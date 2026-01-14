@@ -68,7 +68,7 @@ interface UKSCNumber {
   tenantName: string;
   address: string; 
   phone: string;
-  customUrl: string; 
+  customUrl?: string; 
   billData?: BillData;
 }
 
@@ -134,6 +134,56 @@ const ProgressBar: React.FC<{ progress: number; label: string }> = ({ progress, 
         <div 
           className="h-full bg-indigo-600 rounded-full transition-all duration-700 ease-in-out shadow-[0_0_12px_rgba(79,70,229,0.5)]"
           style={{ width: `${progress}%` }}
+        />
+      </div>
+    </div>
+  );
+};
+
+const PortalPreview: React.FC<{ url: string; onClose: () => void }> = ({ url, onClose }) => {
+  const [scale, setScale] = useState(1);
+  const desktopWidth = 1280; // Standard desktop width to emulate
+
+  useEffect(() => {
+    const handleResize = () => {
+      const windowWidth = window.innerWidth;
+      // If the screen is narrower than desktopWidth, scale down the iframe
+      if (windowWidth < desktopWidth) {
+        setScale(windowWidth / desktopWidth);
+      } else {
+        setScale(1);
+      }
+    };
+    
+    // Initial calculation
+    handleResize();
+    
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-white flex flex-col animate-in fade-in duration-300">
+      <header className="px-6 py-4 border-b flex items-center justify-between bg-slate-50 shadow-sm z-20">
+        <button onClick={onClose} className="p-2 hover:bg-slate-200 rounded-full text-slate-600 transition-colors">
+          <ArrowLeft className="w-5 h-5" />
+        </button>
+        <h2 className="font-extrabold text-slate-800 tracking-tight flex items-center gap-2">
+          <ExternalLink className="w-5 h-5 text-indigo-500" /> 
+          Portal Preview <span className="text-[10px] font-normal bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full hidden sm:inline-block">Desktop Mode</span>
+        </h2>
+        <div className="w-10" />
+      </header>
+      <div className="flex-1 relative bg-slate-100 overflow-hidden w-full h-full">
+        <iframe 
+          src={url} 
+          className="absolute inset-0 border-none bg-white origin-top-left shadow-2xl" 
+          title="Portal View"
+          style={{
+            width: `${desktopWidth}px`,
+            height: `${100 / scale}%`,
+            transform: `scale(${scale})`
+          }}
         />
       </div>
     </div>
@@ -558,16 +608,7 @@ const App = () => {
   };
 
   if (previewUrl) {
-    return (
-      <div className="fixed inset-0 z-[100] bg-white flex flex-col">
-        <header className="px-6 py-4 border-b flex items-center justify-between bg-slate-50">
-          <button onClick={() => setPreviewUrl(null)} className="p-2 hover:bg-slate-200 rounded-full text-slate-600 transition-colors"><ArrowLeft className="w-5 h-5" /></button>
-          <h2 className="font-extrabold text-slate-800 tracking-tight flex items-center gap-2"><ExternalLink className="w-5 h-5 text-indigo-500" /> Portal Preview</h2>
-          <div className="w-10" />
-        </header>
-        <iframe src={previewUrl} className="flex-1 w-full border-none" title="Portal View" />
-      </div>
-    );
+    return <PortalPreview url={previewUrl} onClose={() => setPreviewUrl(null)} />;
   }
 
   return (
@@ -658,8 +699,17 @@ const App = () => {
                           <span>Month: {uksc.billData.billMonth}</span>
                           <div className={`px-3 py-1 rounded-full ${uksc.billData.status.toLowerCase().includes('paid') && !uksc.billData.status.toLowerCase().includes('unpaid') ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>{uksc.billData.status}</div>
                         </div>
-                        <p className="text-3xl font-black text-slate-900 tracking-tight">{uksc.billData.amount}</p>
-                        <p className="text-[10px] font-bold text-slate-400 flex items-center gap-2 italic uppercase"><Clock className="w-3 h-3 text-indigo-300" /> Fetched: {uksc.billData.lastFetched}</p>
+                        <div className="flex items-end justify-between">
+                          <div>
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Due Amount</p>
+                            <p className="text-3xl font-black text-slate-900 tracking-tight leading-none">{uksc.billData.amount}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Due Date</p>
+                            <p className="text-sm font-bold text-slate-700">{uksc.billData.dueDate}</p>
+                          </div>
+                        </div>
+                        <p className="text-[10px] font-bold text-slate-400 flex items-center gap-2 italic uppercase pt-2 border-t border-indigo-100"><Clock className="w-3 h-3 text-indigo-300" /> Fetched: {uksc.billData.lastFetched}</p>
                       </div>
                     ) : (
                       <div className="p-10 border-2 border-dashed border-slate-100 rounded-[2.2rem] flex flex-col items-center justify-center opacity-40">
@@ -771,10 +821,10 @@ const App = () => {
           <div className="space-y-5 p-6 bg-slate-50 rounded-3xl border border-slate-100 shadow-inner">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest"><RefreshCw className="w-4 h-4" />Auto-Sync Frequency</div>
-              <div className="relative inline-flex items-center cursor-pointer">
+              <label className="relative inline-flex items-center cursor-pointer">
                 <input type="checkbox" className="sr-only peer" checked={appSettings.refreshConfig.enabled} onChange={(e) => setAppSettings(prev => ({...prev, refreshConfig: {...prev.refreshConfig, enabled: e.target.checked}}))} />
                 <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-              </div>
+              </label>
             </div>
             
             {appSettings.refreshConfig.enabled && (
@@ -836,6 +886,18 @@ const App = () => {
               <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Plot/Flat No</label><input name="address" defaultValue={editingUKSC.address} className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
               <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">WhatsApp No</label><input name="phone" defaultValue={editingUKSC.phone} placeholder="91XXXXXXXXXX" className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
             </div>
+            
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Custom Portal URL (Optional)</label>
+              <input 
+                name="customUrl" 
+                defaultValue={editingUKSC.customUrl} 
+                placeholder={DEFAULT_URL_TEMPLATE + editingUKSC.number}
+                className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-mono text-xs font-bold focus:border-indigo-500 outline-none transition-all text-slate-600" 
+              />
+              <p className="text-[10px] text-slate-400 ml-2 font-medium">Use &lt;ukscnum&gt; as placeholder for dynamic ID insertion.</p>
+            </div>
+
             <div className="pt-8 flex gap-4">
               <button type="button" onClick={() => setEditingUKSC(null)} className="flex-1 py-4 text-slate-400 font-black hover:text-slate-600 transition-colors">Cancel</button>
               <button type="submit" className="flex-[2] py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-xl hover:bg-indigo-700 active:scale-95 transition-all">Save Changes</button>
