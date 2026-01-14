@@ -35,6 +35,19 @@ import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { GoogleGenAI, Type } from "@google/genai";
 
+// --- Safe Environment Access ---
+// Polyfill to prevent "ReferenceError: process is not defined" in browser
+const getEnvApiKey = () => {
+  try {
+    if (typeof process !== 'undefined' && process.env) {
+      return process.env.API_KEY || '';
+    }
+  } catch (e) {
+    // ignore errors in strict environments
+  }
+  return '';
+};
+
 // --- Types & Interfaces ---
 
 enum ProfileType {
@@ -79,7 +92,7 @@ interface AppSettings {
 
 // --- Constants ---
 
-const STORAGE_KEY = 'powerbill_manager_v6_data';
+const STORAGE_KEY = 'powerbill_manager_v7_data';
 const DEFAULT_URL_TEMPLATE = 'https://tgsouthernpower.org/billinginfo?ukscno=';
 
 const PROXY_LIST = [
@@ -178,7 +191,7 @@ const App = () => {
   const [isSavingKey, setIsSavingKey] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  const hasApiKey = useMemo(() => !!(appSettings.customApiKey || process.env.API_KEY), [appSettings.customApiKey]);
+  const hasApiKey = useMemo(() => !!(appSettings.customApiKey || getEnvApiKey()), [appSettings.customApiKey]);
 
   // Load Initial Data
   useEffect(() => {
@@ -211,14 +224,21 @@ const App = () => {
     if (!searchQuery) return activeProfile.ukscs;
     const q = searchQuery.toLowerCase();
     return activeProfile.ukscs.filter(u => 
-      u.number.toLowerCase().includes(q) || 
-      u.nickname.toLowerCase().includes(q) ||
-      u.tenantName.toLowerCase().includes(q)
+      (u.number || '').toLowerCase().includes(q) || 
+      (u.nickname || '').toLowerCase().includes(q) ||
+      (u.tenantName || '').toLowerCase().includes(q)
     );
   }, [activeProfile, searchQuery]);
 
+  // Helper to check for global uniqueness of UKSC Number
+  const isDuplicateUKSC = (number: string, excludeId: string | null = null) => {
+    return profiles.some(profile => 
+      profile.ukscs.some(uksc => uksc.number === number && uksc.id !== excludeId)
+    );
+  };
+
   const fetchBillDetails = async (uksc: UKSCNumber) => {
-    const apiKeyToUse = appSettings.customApiKey || process.env.API_KEY || '';
+    const apiKeyToUse = appSettings.customApiKey || getEnvApiKey();
     
     if (!apiKeyToUse) {
       setErrorLog("Google GenAI API Key is missing. Check Settings.");
@@ -316,17 +336,20 @@ const App = () => {
   const handleBulkAdd = (input: string) => {
     if (!activeProfileId) return;
     const numbers = input.split(/[\n,]+/).map(n => n.trim()).filter(n => n.length > 0);
-    const allExistingNumbers = new Set(profiles.flatMap(p => p.ukscs.map(u => u.number)));
+    
+    // Global Uniqueness Check
+    const duplicates: string[] = [];
     const newUKSCs: UKSCNumber[] = [];
     
     numbers.forEach(num => {
-      if (!allExistingNumbers.has(num)) {
+      if (isDuplicateUKSC(num)) {
+        duplicates.push(num);
+      } else {
         const u: UKSCNumber = {
           id: crypto.randomUUID(), number: num, nickname: `Unit ${num.slice(-3)}`,
           tenantName: '', address: '', phone: '', customUrl: `${DEFAULT_URL_TEMPLATE}${num}`
         };
         newUKSCs.push(u);
-        allExistingNumbers.add(num);
       }
     });
 
@@ -334,16 +357,26 @@ const App = () => {
       setProfiles(prev => prev.map(p => p.id === activeProfileId ? { ...p, ukscs: [...p.ukscs, ...newUKSCs] } : p));
       newUKSCs.forEach(u => fetchBillDetails(u));
     }
+    
+    if (duplicates.length > 0) {
+      alert(`Skipped ${duplicates.length} duplicate UKSC numbers: ${duplicates.join(', ')}`);
+    }
+    
     setIsBulkAddModalOpen(false);
   };
 
   const handleUpdateUKSC = (updated: UKSCNumber) => {
+    if (isDuplicateUKSC(updated.number, updated.id)) {
+      alert(`UKSC Number ${updated.number} already exists in the system. Uniqueness is required.`);
+      return;
+    }
+
     setProfiles(prev => prev.map(p => p.id === activeProfileId ? { ...p, ukscs: p.ukscs.map(u => u.id === updated.id ? updated : u) } : p));
     setEditingUKSC(null);
   };
 
   const handleDeleteUKSC = (id: string) => {
-    if (confirm("Delete this unit?")) {
+    if (confirm("Are you sure you want to delete this unit?")) {
       setProfiles(prev => prev.map(p => p.id === activeProfileId ? { ...p, ukscs: p.ukscs.filter(u => u.id !== id) } : p));
     }
   };
@@ -359,9 +392,7 @@ const App = () => {
     }, 1200);
   };
 
-  const generateFullPDFReport = async (uksc: UKSCNumber) => {
-    setExportingId(uksc.id);
-    setProgress(5);
+  const generatePDFDoc = (uksc: UKSCNumber) => {
     const doc = new jsPDF();
     const finalUrl = (uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number);
 
@@ -374,7 +405,6 @@ const App = () => {
     doc.setFontSize(10);
     doc.setTextColor(156, 163, 175);
     doc.text(`Service ID: ${uksc.number}`, 20, 38);
-    setProgress(30);
 
     autoTable(doc, {
       startY: 70,
@@ -387,7 +417,6 @@ const App = () => {
       headStyles: { fillColor: [79, 70, 229] },
       theme: 'grid'
     });
-    setProgress(60);
 
     if (uksc.billData) {
       autoTable(doc, {
@@ -404,7 +433,6 @@ const App = () => {
         theme: 'striped'
       });
     }
-    setProgress(80);
 
     const finalY = (doc as any).lastAutoTable.finalY + 35;
     doc.setFontSize(14);
@@ -412,16 +440,15 @@ const App = () => {
     doc.setTextColor(79, 70, 229);
     doc.text("OFFICIAL PORTAL ACCESS:", 20, finalY);
     
-    // Improved Link Text to avoid cutoff and increase usability
+    // Hyperlink to avoid text cutoff
     const linkText = `Bill for ${uksc.number}`;
     doc.setFontSize(18); 
     doc.setFont("helvetica", "bold");
     doc.setTextColor(79, 70, 229);
     doc.text(linkText, 20, finalY + 15);
-    
-    // Add clickable annotation (Hyperlink)
     doc.link(20, finalY + 8, 80, 10, { url: finalUrl });
-    // Underline effect
+    
+    // Underline
     doc.setDrawColor(79, 70, 229);
     doc.setLineWidth(0.5);
     doc.line(20, finalY + 16, 20 + doc.getTextWidth(linkText), finalY + 16);
@@ -436,23 +463,56 @@ const App = () => {
     doc.setFontSize(11);
     doc.setTextColor(100, 116, 139);
     doc.text("CLICK THE TEXT ABOVE TO OPEN PORTAL", 40, arrowY + 8);
+    
+    return doc;
+  }
 
+  const handleDownloadPDF = async (uksc: UKSCNumber) => {
+    setExportingId(uksc.id);
+    setProgress(5);
+    const doc = generatePDFDoc(uksc);
     setProgress(95);
     doc.save(`PowerBill_${uksc.number}.pdf`);
     setProgress(100);
-    
     setTimeout(() => { setExportingId(null); setProgress(0); }, 800);
   };
 
   const handleShareWhatsApp = async (uksc: UKSCNumber) => {
     if (!uksc.phone) return alert("Please set a WhatsApp number for this unit.");
     
-    // Constructing a text report that mirrors the PDF data
+    setExportingId(uksc.id);
+    setProgress(10);
+
+    // Try sharing the actual PDF file via Web Share API (Mobile)
+    try {
+      if (navigator.canShare && navigator.share) {
+         const doc = generatePDFDoc(uksc);
+         const pdfBlob = doc.output('blob');
+         const file = new File([pdfBlob], `Bill_${uksc.number}.pdf`, { type: 'application/pdf' });
+         if (navigator.canShare({ files: [file] })) {
+            await navigator.share({
+              files: [file],
+              title: `Bill Report - ${uksc.nickname}`,
+              text: `Here is the electricity bill summary for ${uksc.nickname}.`
+            });
+            setExportingId(null);
+            setProgress(0);
+            return;
+         }
+      }
+    } catch (e) {
+      console.log("File share not supported or cancelled, falling back to text link.");
+    }
+
+    // Fallback to Text Link sharing
     const text = `*POWERBILL SUMMARY REPORT*\n---------------------------\n*Property:* ${activeProfile?.name}\n*Unit Alias:* ${uksc.nickname}\n*UKSC ID:* ${uksc.number}\n*Occupant:* ${uksc.tenantName || 'N/A'}\n*Address:* ${uksc.address || 'N/A'}\n\n*BILL DETAILS*\n*Month:* ${uksc.billData?.billMonth || 'N/A'}\n*Amount:* ${uksc.billData?.amount || 'N/A'}\n*Due Date:* ${uksc.billData?.dueDate || 'N/A'}\n*Status:* ${uksc.billData?.status || 'N/A'}\n\n_Official Portal Access:_\n${(uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number)}`;
 
     let phone = uksc.phone.replace(/\D/g, '');
     phone = phone.startsWith('91') ? phone : `91${phone}`;
     window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
+    
+    setExportingId(null);
+    setProgress(0);
   };
 
   if (previewUrl) {
@@ -541,7 +601,10 @@ const App = () => {
                   <div className="p-8 flex-1 space-y-6">
                     <div className="flex justify-between items-start">
                       <div className="w-14 h-14 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-400 group-hover:bg-indigo-50 group-hover:text-indigo-600 transition-colors"><FileText className="w-7 h-7" /></div>
-                      <button onClick={() => setEditingUKSC(uksc)} className="p-3 text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-colors"><Edit3 className="w-5 h-5" /></button>
+                      <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                        <button onClick={() => setEditingUKSC(uksc)} className="p-3 text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 rounded-2xl transition-colors"><Edit3 className="w-5 h-5" /></button>
+                        <button onClick={() => handleDeleteUKSC(uksc.id)} className="p-3 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-2xl transition-colors"><Trash2 className="w-5 h-5" /></button>
+                      </div>
                     </div>
                     <div>
                       <h4 className="text-2xl font-black text-slate-900 leading-tight group-hover:text-indigo-600 transition-colors">{uksc.nickname}</h4>
@@ -562,7 +625,7 @@ const App = () => {
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Awaiting Analysis</p>
                       </div>
                     )}
-                    {(loading === uksc.id || exportingId === uksc.id) && <ProgressBar progress={progress} label={loading === uksc.id ? "Analyzing Portal..." : "Generating PDF..."} />}
+                    {(loading === uksc.id || exportingId === uksc.id) && <ProgressBar progress={progress} label={loading === uksc.id ? "Analyzing Portal..." : "Generating Report..."} />}
                     {errorLog && loading === uksc.id && <div className="mt-4 p-3 bg-red-50 rounded-xl flex items-center gap-2 text-[10px] font-bold text-red-600 animate-pulse"><AlertCircle className="w-4 h-4" />{errorLog}</div>}
                   </div>
                   <div className="p-6 pt-0 flex gap-2">
@@ -571,7 +634,7 @@ const App = () => {
                       <Eye className="w-5 h-5" />
                       <ArrowRight className="w-4 h-4 blinking-arrow hidden group-hover:block" />
                     </button>
-                    <button onClick={() => generateFullPDFReport(uksc)} disabled={!!loading || !!exportingId} className="p-4 bg-slate-900 text-white rounded-2xl hover:bg-indigo-600 disabled:opacity-50 transition-all shadow-lg"><Download className="w-5 h-5" /></button>
+                    <button onClick={() => handleDownloadPDF(uksc)} disabled={!!loading || !!exportingId} className="p-4 bg-slate-900 text-white rounded-2xl hover:bg-indigo-600 disabled:opacity-50 transition-all shadow-lg"><Download className="w-5 h-5" /></button>
                     <button onClick={() => handleShareWhatsApp(uksc)} className="p-4 bg-emerald-500 text-white rounded-2xl hover:bg-emerald-600 transition-all shadow-lg"><Share2 className="w-5 h-5" /></button>
                   </div>
                 </div>
@@ -624,7 +687,7 @@ const App = () => {
                   value={tempApiKey}
                   onChange={(e) => setTempApiKey(e.target.value)}
                   placeholder="Enter AI API Key..."
-                  className={`w-full pl-6 pr-14 py-5 bg-slate-50 border-2 rounded-[1.5rem] focus:border-indigo-500 outline-none font-mono text-sm font-bold transition-all ${!tempApiKey && !process.env.API_KEY ? 'border-red-100' : 'border-slate-100'}`}
+                  className={`w-full pl-6 pr-14 py-5 bg-slate-50 border-2 rounded-[1.5rem] focus:border-indigo-500 outline-none font-mono text-sm font-bold transition-all ${!tempApiKey && !getEnvApiKey() ? 'border-red-100' : 'border-slate-100'}`}
                 />
                 <button 
                   onClick={() => setShowApiKey(!showApiKey)}
