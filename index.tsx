@@ -29,7 +29,8 @@ import {
   ExternalLink,
   Key,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  CalendarClock
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -42,7 +43,13 @@ enum ProfileType {
   APARTMENT = 'APARTMENT'
 }
 
-type RefreshInterval = 'off' | '1h' | '6h' | '12h' | '24h';
+type TimeUnit = 'minutes' | 'hours' | 'days' | 'weeks' | 'months' | 'years';
+
+interface RefreshConfig {
+  enabled: boolean;
+  value: number;
+  unit: TimeUnit;
+}
 
 interface BillData {
   consumerName: string;
@@ -73,7 +80,7 @@ interface Profile {
 }
 
 interface AppSettings {
-  refreshInterval: RefreshInterval;
+  refreshConfig: RefreshConfig;
   customApiKey: string;
 }
 
@@ -154,12 +161,33 @@ const robustFetch = async (targetUrl: string): Promise<string> => {
   throw new Error("Billing portal unreachable. All network gateways blocked.");
 };
 
+const calculateMilliseconds = (value: number, unit: TimeUnit): number => {
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  switch (unit) {
+    case 'minutes': return value * minute;
+    case 'hours': return value * hour;
+    case 'days': return value * day;
+    case 'weeks': return value * day * 7;
+    case 'months': return value * day * 30;
+    case 'years': return value * day * 365;
+    default: return 0;
+  }
+};
+
 // --- App Root Component ---
 
 const App = () => {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const [appSettings, setAppSettings] = useState<AppSettings>({ refreshInterval: 'off', customApiKey: '' });
+  
+  // Default settings
+  const [appSettings, setAppSettings] = useState<AppSettings>({ 
+    refreshConfig: { enabled: false, value: 6, unit: 'hours' }, 
+    customApiKey: '' 
+  });
+
   const [showApiKey, setShowApiKey] = useState(false);
   const [isNewProfileModalOpen, setIsNewProfileModalOpen] = useState(false);
   const [isBulkAddModalOpen, setIsBulkAddModalOpen] = useState(false);
@@ -181,13 +209,38 @@ const App = () => {
   // STRICT API KEY POLICY: Only use the key from settings.
   const hasApiKey = useMemo(() => !!appSettings.customApiKey, [appSettings.customApiKey]);
 
-  // Load Initial Data
+  // Load Initial Data with Migration for old settings
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        const loadedSettings = parsed.settings || { refreshInterval: 'off', customApiKey: '' };
+        let loadedSettings: AppSettings;
+
+        // Migration logic for old refreshInterval string
+        if (parsed.settings?.refreshInterval) {
+           const old = parsed.settings.refreshInterval; // 'off' | '1h' etc
+           const config: RefreshConfig = { enabled: false, value: 6, unit: 'hours' };
+           
+           if (old !== 'off') {
+             config.enabled = true;
+             if (old === '1h') config.value = 1;
+             else if (old === '12h') config.value = 12;
+             else if (old === '24h') config.value = 24;
+           }
+           loadedSettings = {
+             customApiKey: parsed.settings.customApiKey || '',
+             refreshConfig: config
+           };
+        } else if (parsed.settings?.refreshConfig) {
+          loadedSettings = parsed.settings;
+        } else {
+          loadedSettings = { 
+            refreshConfig: { enabled: false, value: 6, unit: 'hours' }, 
+            customApiKey: parsed.settings?.customApiKey || '' 
+          };
+        }
+
         setProfiles(parsed.profiles || []);
         setAppSettings(loadedSettings);
         setTempApiKey(loadedSettings.customApiKey || '');
@@ -290,11 +343,10 @@ const App = () => {
 
   // Background Refresh Logic
   useEffect(() => {
-    if (appSettings.refreshInterval === 'off') return;
+    if (!appSettings.refreshConfig.enabled) return;
 
-    const intervalMap: Record<RefreshInterval, number> = {
-      'off': 0, '1h': 3600000, '6h': 21600000, '12h': 43200000, '24h': 86400000
-    };
+    const intervalMs = calculateMilliseconds(appSettings.refreshConfig.value, appSettings.refreshConfig.unit);
+    if (intervalMs <= 0) return;
 
     const timer = setInterval(async () => {
       for (const p of profiles) {
@@ -303,10 +355,10 @@ const App = () => {
           await new Promise(r => setTimeout(r, 2000));
         }
       }
-    }, intervalMap[appSettings.refreshInterval]);
+    }, intervalMs);
 
     return () => clearInterval(timer);
-  }, [appSettings.refreshInterval, profiles]);
+  }, [appSettings.refreshConfig, profiles]);
 
   const handleCreateProfile = (name: string, type: ProfileType) => {
     const newProf: Profile = { id: crypto.randomUUID(), name, type, ukscs: [] };
@@ -716,13 +768,48 @@ const App = () => {
           </div>
 
           {/* AUTO REFRESH CONFIG */}
-          <div className="space-y-4 p-6 bg-slate-50 rounded-3xl border border-slate-100 shadow-inner">
-            <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest"><RefreshCw className="w-4 h-4" />Sync Interval</div>
-            <div className="grid grid-cols-5 gap-1.5">
-              {(['off', '1h', '6h', '12h', '24h'] as RefreshInterval[]).map(val => (
-                <button key={val} onClick={() => setAppSettings({...appSettings, refreshInterval: val})} className={`py-3 rounded-xl font-black text-[10px] transition-all uppercase ${appSettings.refreshInterval === val ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-slate-400 hover:bg-slate-100'}`}>{val}</button>
-              ))}
+          <div className="space-y-5 p-6 bg-slate-50 rounded-3xl border border-slate-100 shadow-inner">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest"><RefreshCw className="w-4 h-4" />Auto-Sync Frequency</div>
+              <div className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" className="sr-only peer" checked={appSettings.refreshConfig.enabled} onChange={(e) => setAppSettings(prev => ({...prev, refreshConfig: {...prev.refreshConfig, enabled: e.target.checked}}))} />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </div>
             </div>
+            
+            {appSettings.refreshConfig.enabled && (
+              <div className="animate-in fade-in slide-in-from-top-2">
+                <div className="flex gap-4 items-center">
+                   <div className="flex-1">
+                     <input 
+                       type="number" 
+                       min="1"
+                       value={appSettings.refreshConfig.value}
+                       onChange={(e) => setAppSettings(prev => ({...prev, refreshConfig: {...prev.refreshConfig, value: Math.max(1, parseInt(e.target.value) || 1)}}))}
+                       className="w-full px-4 py-3 bg-white border-2 border-slate-200 rounded-xl font-black text-slate-700 focus:border-indigo-500 outline-none text-center"
+                     />
+                   </div>
+                   <div className="flex-[2]">
+                     <select 
+                       value={appSettings.refreshConfig.unit} 
+                       onChange={(e) => setAppSettings(prev => ({...prev, refreshConfig: {...prev.refreshConfig, unit: e.target.value as TimeUnit}}))}
+                       className="w-full px-4 py-3 bg-white border-2 border-slate-200 rounded-xl font-black text-slate-700 focus:border-indigo-500 outline-none appearance-none"
+                     >
+                        <option value="minutes">Minutes</option>
+                        <option value="hours">Hours</option>
+                        <option value="days">Days</option>
+                        <option value="weeks">Weeks</option>
+                        <option value="months">Months</option>
+                        <option value="years">Years</option>
+                     </select>
+                   </div>
+                </div>
+                <p className="mt-3 text-[10px] font-bold text-slate-400 text-center flex items-center justify-center gap-1">
+                  <CalendarClock className="w-3 h-3" />
+                  Applies globally to all vaults and UKSC numbers.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -733,7 +820,7 @@ const App = () => {
              const file = e.target.files?.[0];
              if (!file) return;
              const reader = new FileReader();
-             reader.onload = (event) => { try { const p = JSON.parse(event.target?.result as string); setProfiles(p.profiles || []); setAppSettings(p.settings || {refreshInterval: 'off', customApiKey: ''}); setTempApiKey(p.settings?.customApiKey || ''); alert("Vault Restored."); } catch (err) { alert("Invalid backup file."); } };
+             reader.onload = (event) => { try { const p = JSON.parse(event.target?.result as string); setProfiles(p.profiles || []); setAppSettings({ customApiKey: p.settings?.customApiKey || '', refreshConfig: p.settings?.refreshConfig || { enabled: false, value: 6, unit: 'hours' } }); setTempApiKey(p.settings?.customApiKey || ''); alert("Vault Restored."); } catch (err) { alert("Invalid backup file."); } };
              reader.readAsText(file);
           }} />
         </div>
