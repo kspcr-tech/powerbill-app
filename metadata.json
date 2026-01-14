@@ -1,6 +1,6 @@
 {
-  "name": "PowerVault TSSPDCL Manager",
-  "description": "A comprehensive management tool for TSSPDCL power bills, allowing users to track multiple UKSC numbers, manage tenant details, and generate PDF summaries for WhatsApp sharing.",
+  "name": "PowerBill Manager",
+  "description": "A comprehensive management tool for power bills, allowing users to track multiple UKSC numbers, manage tenant details, and generate PDF summaries for WhatsApp sharing.",
   "requestFramePermissions": [
     "camera"
   ]
