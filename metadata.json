@@ -1,7 +1,5 @@
 {
   "name": "PowerBill Manager",
-  "description": "A comprehensive management tool for power bills, allowing users to track multiple UKSC numbers, manage tenant details, and generate PDF summaries for WhatsApp sharing.",
-  "requestFramePermissions": [
-    "camera"
-  ]
+  "description": "Smart utility tracker for managing multiple electricity service IDs with AI analysis and PDF reporting.",
+  "requestFramePermissions": []
 }

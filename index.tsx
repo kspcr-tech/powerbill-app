@@ -19,13 +19,17 @@ import {
   Settings,
   Upload,
   Eye,
+  EyeOff,
   ArrowLeft,
   Loader2,
   AlertCircle,
   ArrowRight,
   ShieldCheck,
   RefreshCw,
-  ExternalLink
+  ExternalLink,
+  Key,
+  CheckCircle2,
+  AlertTriangle
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -70,11 +74,12 @@ interface Profile {
 
 interface AppSettings {
   refreshInterval: RefreshInterval;
+  customApiKey: string;
 }
 
 // --- Constants ---
 
-const STORAGE_KEY = 'powerbill_manager_v5_data_v5';
+const STORAGE_KEY = 'powerbill_manager_v6_data';
 const DEFAULT_URL_TEMPLATE = 'https://tgsouthernpower.org/billinginfo?ukscno=';
 
 const PROXY_LIST = [
@@ -131,7 +136,6 @@ const ProgressBar: React.FC<{ progress: number; label: string }> = ({ progress, 
 // --- Utilities ---
 
 const robustFetch = async (targetUrl: string): Promise<string> => {
-  let lastError = null;
   for (const proxy of PROXY_LIST) {
     try {
       const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
@@ -144,10 +148,10 @@ const robustFetch = async (targetUrl: string): Promise<string> => {
         if (text && text.length > 100) return text;
       }
     } catch (e) {
-      lastError = e;
+      console.warn(`Proxy failed: ${proxy}`);
     }
   }
-  throw new Error("Unable to reach billing portal. Network blocked.");
+  throw new Error("Billing portal unreachable. All network gateways blocked.");
 };
 
 // --- App Root Component ---
@@ -155,7 +159,8 @@ const robustFetch = async (targetUrl: string): Promise<string> => {
 const App = () => {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const [appSettings, setAppSettings] = useState<AppSettings>({ refreshInterval: 'off' });
+  const [appSettings, setAppSettings] = useState<AppSettings>({ refreshInterval: 'off', customApiKey: '' });
+  const [showApiKey, setShowApiKey] = useState(false);
   const [isNewProfileModalOpen, setIsNewProfileModalOpen] = useState(false);
   const [isBulkAddModalOpen, setIsBulkAddModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
@@ -165,7 +170,15 @@ const App = () => {
   const [exportingId, setExportingId] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0);
   const [errorLog, setErrorLog] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // States for Settings Feedback
+  const [tempApiKey, setTempApiKey] = useState('');
+  const [isSavingKey, setIsSavingKey] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  const hasApiKey = useMemo(() => !!(appSettings.customApiKey || process.env.API_KEY), [appSettings.customApiKey]);
 
   // Load Initial Data
   useEffect(() => {
@@ -173,8 +186,10 @@ const App = () => {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
+        const loadedSettings = parsed.settings || { refreshInterval: 'off', customApiKey: '' };
         setProfiles(parsed.profiles || []);
-        setAppSettings(parsed.settings || { refreshInterval: 'off' });
+        setAppSettings(loadedSettings);
+        setTempApiKey(loadedSettings.customApiKey || '');
         if (parsed.profiles?.length > 0) setActiveProfileId(parsed.profiles[0].id);
       } catch (e) {
         console.error("Data Load Error", e);
@@ -191,7 +206,26 @@ const App = () => {
     profiles.find(p => p.id === activeProfileId) || null
   , [profiles, activeProfileId]);
 
+  const filteredUKSCs = useMemo(() => {
+    if (!activeProfile) return [];
+    if (!searchQuery) return activeProfile.ukscs;
+    const q = searchQuery.toLowerCase();
+    return activeProfile.ukscs.filter(u => 
+      u.number.toLowerCase().includes(q) || 
+      u.nickname.toLowerCase().includes(q) ||
+      u.tenantName.toLowerCase().includes(q)
+    );
+  }, [activeProfile, searchQuery]);
+
   const fetchBillDetails = async (uksc: UKSCNumber) => {
+    const apiKeyToUse = appSettings.customApiKey || process.env.API_KEY || '';
+    
+    if (!apiKeyToUse) {
+      setErrorLog("Google GenAI API Key is missing. Check Settings.");
+      setIsSettingsModalOpen(true);
+      return;
+    }
+
     setLoading(uksc.id);
     setProgress(5);
     setErrorLog(null);
@@ -201,7 +235,7 @@ const App = () => {
       const rawHtml = await robustFetch(finalUrl);
       setProgress(50);
 
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: apiKeyToUse });
       const response = await ai.models.generateContent({
         model: 'gemini-3-pro-preview',
         contents: [
@@ -235,7 +269,7 @@ const App = () => {
       })));
       setProgress(100);
     } catch (err: any) {
-      setErrorLog(err.message || "Extraction error.");
+      setErrorLog(err.message || "AI Extraction error.");
     } finally {
       setTimeout(() => {
         setLoading(null);
@@ -249,11 +283,7 @@ const App = () => {
     if (appSettings.refreshInterval === 'off') return;
 
     const intervalMap: Record<RefreshInterval, number> = {
-      'off': 0,
-      '1h': 3600000,
-      '6h': 21600000,
-      '12h': 43200000,
-      '24h': 86400000
+      'off': 0, '1h': 3600000, '6h': 21600000, '12h': 43200000, '24h': 86400000
     };
 
     const timer = setInterval(async () => {
@@ -291,17 +321,17 @@ const App = () => {
     
     numbers.forEach(num => {
       if (!allExistingNumbers.has(num)) {
-        newUKSCs.push({
+        const u: UKSCNumber = {
           id: crypto.randomUUID(), number: num, nickname: `Unit ${num.slice(-3)}`,
           tenantName: '', address: '', phone: '', customUrl: `${DEFAULT_URL_TEMPLATE}${num}`
-        });
+        };
+        newUKSCs.push(u);
         allExistingNumbers.add(num);
       }
     });
 
     if (newUKSCs.length > 0) {
       setProfiles(prev => prev.map(p => p.id === activeProfileId ? { ...p, ukscs: [...p.ukscs, ...newUKSCs] } : p));
-      // Auto "Check Bill" for new numbers
       newUKSCs.forEach(u => fetchBillDetails(u));
     }
     setIsBulkAddModalOpen(false);
@@ -318,13 +348,23 @@ const App = () => {
     }
   };
 
+  const handleSaveApiKey = () => {
+    setIsSavingKey(true);
+    setSaveSuccess(false);
+    setTimeout(() => {
+      setAppSettings(prev => ({ ...prev, customApiKey: tempApiKey }));
+      setIsSavingKey(false);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    }, 1200);
+  };
+
   const generateFullPDFReport = async (uksc: UKSCNumber) => {
     setExportingId(uksc.id);
     setProgress(5);
     const doc = new jsPDF();
     const finalUrl = (uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number);
 
-    // Header section
     doc.setFillColor(30, 41, 59);
     doc.rect(0, 0, 210, 50, 'F');
     doc.setFont("helvetica", "bold");
@@ -333,40 +373,32 @@ const App = () => {
     doc.text("POWERBILL SUMMARY", 20, 28);
     doc.setFontSize(10);
     doc.setTextColor(156, 163, 175);
-    doc.text(`Official Analysis for Service ID: ${uksc.number}`, 20, 38);
+    doc.text(`Service ID: ${uksc.number}`, 20, 38);
     setProgress(30);
-
-    // Metadata Section
-    doc.setTextColor(30, 41, 59);
-    doc.setFontSize(10);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, 140, 60);
 
     autoTable(doc, {
       startY: 70,
-      head: [['Identity & Metadata', 'Details']],
+      head: [['Metadata', 'Details']],
       body: [
         ['Alias/Unit Name', uksc.nickname],
-        ['Occupant', uksc.tenantName || 'Not Specified'],
-        ['Plot/Flat Number', uksc.address || 'Not Specified'],
-        ['UKSC Identification', uksc.number]
+        ['Occupant', uksc.tenantName || 'N/A'],
+        ['Plot/Flat Number', uksc.address || 'N/A']
       ],
       headStyles: { fillColor: [79, 70, 229] },
       theme: 'grid'
     });
     setProgress(60);
 
-    // Bill Data Section
     if (uksc.billData) {
       autoTable(doc, {
-        startY: (doc as any).lastAutoTable.finalY + 12,
-        head: [['Extracted Bill Information', 'Value']],
+        startY: (doc as any).lastAutoTable.finalY + 10,
+        head: [['Bill Details', 'Value']],
         body: [
-          ['Consumer Name', uksc.billData.consumerName],
+          ['Name on Portal', uksc.billData.consumerName],
           ['Billing Month', uksc.billData.billMonth],
           ['Payable Amount', uksc.billData.amount],
-          ['Payment Due Date', uksc.billData.dueDate],
-          ['Usage (Units)', uksc.billData.units],
-          ['Status', uksc.billData.status.toUpperCase()]
+          ['Due Date', uksc.billData.dueDate],
+          ['Units Used', uksc.billData.units]
         ],
         headStyles: { fillColor: [30, 41, 59] },
         theme: 'striped'
@@ -374,45 +406,50 @@ const App = () => {
     }
     setProgress(80);
 
-    // HIGH VISIBILITY PORTAL LINK
     const finalY = (doc as any).lastAutoTable.finalY + 35;
     doc.setFontSize(14);
     doc.setFont("helvetica", "bold");
     doc.setTextColor(79, 70, 229);
     doc.text("OFFICIAL PORTAL ACCESS:", 20, finalY);
     
-    // Large Bold URL
+    // Improved Link Text to avoid cutoff and increase usability
+    const linkText = `Bill for ${uksc.number}`;
     doc.setFontSize(18); 
     doc.setFont("helvetica", "bold");
-    doc.setTextColor(15, 23, 42);
-    doc.text(finalUrl, 20, finalY + 15, { maxWidth: 170 });
+    doc.setTextColor(79, 70, 229);
+    doc.text(linkText, 20, finalY + 15);
+    
+    // Add clickable annotation (Hyperlink)
+    doc.link(20, finalY + 8, 80, 10, { url: finalUrl });
+    // Underline effect
+    doc.setDrawColor(79, 70, 229);
+    doc.setLineWidth(0.5);
+    doc.line(20, finalY + 16, 20 + doc.getTextWidth(linkText), finalY + 16);
 
-    // Arrow Indicator Graphic
     const arrowY = finalY + 28;
     doc.setDrawColor(79, 70, 229);
-    doc.setLineWidth(1.2);
-    // Vertical line pointing UP to the URL
-    doc.line(30, arrowY + 12, 30, arrowY); 
-    // Arrow head
-    doc.line(27, arrowY + 4, 30, arrowY);
-    doc.line(33, arrowY + 4, 30, arrowY);
+    doc.setLineWidth(1.5);
+    doc.line(30, arrowY + 15, 30, arrowY); 
+    doc.line(25, arrowY + 5, 30, arrowY); 
+    doc.line(35, arrowY + 5, 30, arrowY); 
     
-    // Instruction text on the arrow
-    doc.setFontSize(12);
-    doc.setFont("helvetica", "bolditalic");
-    doc.setTextColor(79, 70, 229);
-    doc.text("CLICK THE URL ABOVE FOR MORE DETAILS", 36, arrowY + 6);
+    doc.setFontSize(11);
+    doc.setTextColor(100, 116, 139);
+    doc.text("CLICK THE TEXT ABOVE TO OPEN PORTAL", 40, arrowY + 8);
 
     setProgress(95);
-    doc.save(`PowerBill_${uksc.number}_Report.pdf`);
+    doc.save(`PowerBill_${uksc.number}.pdf`);
     setProgress(100);
     
     setTimeout(() => { setExportingId(null); setProgress(0); }, 800);
   };
 
   const handleShareWhatsApp = async (uksc: UKSCNumber) => {
-    if (!uksc.phone) return alert("Please set a WhatsApp phone number in the unit settings.");
-    const text = `*Electricity Bill Update*\n\nUnit: ${uksc.nickname}\nUKSC ID: ${uksc.number}\nAmount: ${uksc.billData?.amount || 'N/A'}\nDue: ${uksc.billData?.dueDate || 'N/A'}\n\n_Access Bill Portal here:_ ${DEFAULT_URL_TEMPLATE}${uksc.number}`;
+    if (!uksc.phone) return alert("Please set a WhatsApp number for this unit.");
+    
+    // Constructing a text report that mirrors the PDF data
+    const text = `*POWERBILL SUMMARY REPORT*\n---------------------------\n*Property:* ${activeProfile?.name}\n*Unit Alias:* ${uksc.nickname}\n*UKSC ID:* ${uksc.number}\n*Occupant:* ${uksc.tenantName || 'N/A'}\n*Address:* ${uksc.address || 'N/A'}\n\n*BILL DETAILS*\n*Month:* ${uksc.billData?.billMonth || 'N/A'}\n*Amount:* ${uksc.billData?.amount || 'N/A'}\n*Due Date:* ${uksc.billData?.dueDate || 'N/A'}\n*Status:* ${uksc.billData?.status || 'N/A'}\n\n_Official Portal Access:_\n${(uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number)}`;
+
     let phone = uksc.phone.replace(/\D/g, '');
     phone = phone.startsWith('91') ? phone : `91${phone}`;
     window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
@@ -423,7 +460,7 @@ const App = () => {
       <div className="fixed inset-0 z-[100] bg-white flex flex-col">
         <header className="px-6 py-4 border-b flex items-center justify-between bg-slate-50">
           <button onClick={() => setPreviewUrl(null)} className="p-2 hover:bg-slate-200 rounded-full text-slate-600 transition-colors"><ArrowLeft className="w-5 h-5" /></button>
-          <h2 className="font-extrabold text-slate-800 tracking-tight flex items-center gap-2"><ExternalLink className="w-5 h-5 text-indigo-500" /> Portal Live View</h2>
+          <h2 className="font-extrabold text-slate-800 tracking-tight flex items-center gap-2"><ExternalLink className="w-5 h-5 text-indigo-500" /> Portal Preview</h2>
           <div className="w-10" />
         </header>
         <iframe src={previewUrl} className="flex-1 w-full border-none" title="Portal View" />
@@ -434,20 +471,23 @@ const App = () => {
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-[#fcfdfe] relative">
       <style>{`
-        @keyframes blink-arrow { 0%, 100% { opacity: 1; transform: translateX(0); } 50% { opacity: 0.3; transform: translateX(5px); } }
-        .blinking-arrow { animation: blink-arrow 0.8s infinite ease-in-out; }
+        @keyframes blink-arrow { 0%, 100% { opacity: 1; transform: translateX(0); } 50% { opacity: 0.2; transform: translateX(6px); } }
+        .blinking-arrow { animation: blink-arrow 0.6s infinite ease-in-out; }
       `}</style>
 
-      <button onClick={() => setIsSettingsModalOpen(true)} className="fixed top-6 right-6 z-50 p-4 bg-white border border-slate-200 rounded-2xl shadow-xl text-slate-400 hover:text-indigo-600 transition-all hover:scale-105 active:scale-95"><Settings className="w-6 h-6" /></button>
+      <button onClick={() => setIsSettingsModalOpen(true)} className={`fixed top-6 right-6 z-50 p-4 bg-white border border-slate-200 rounded-2xl shadow-xl text-slate-400 hover:text-indigo-600 transition-all hover:scale-105 active:scale-95 ${!hasApiKey ? 'ring-4 ring-red-100' : ''}`}>
+        <Settings className="w-6 h-6" />
+        {!hasApiKey && <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full border-2 border-white" />}
+      </button>
 
       <aside className="w-full md:w-80 bg-white border-r border-slate-100 flex flex-col h-auto md:h-screen sticky top-0 z-30 shadow-sm">
         <div className="p-8">
           <div className="flex items-center gap-4 mb-12">
             <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg rotate-3"><LayoutGrid className="w-7 h-7" /></div>
-            <div><h1 className="text-xl font-black text-slate-900 tracking-tight">PowerBill</h1><p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em]">Manager v5</p></div>
+            <div><h1 className="text-xl font-black text-slate-900 tracking-tight">PowerBill</h1><p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em]">Manager</p></div>
           </div>
           <div className="space-y-1">
-            <div className="flex items-center justify-between mb-4 px-2"><span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Vaults</span><button onClick={() => setIsNewProfileModalOpen(true)} className="p-1.5 hover:bg-indigo-50 text-indigo-600 rounded-xl transition-colors"><PlusCircle className="w-5 h-5" /></button></div>
+            <div className="flex items-center justify-between mb-4 px-2"><span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Property Vaults</span><button onClick={() => setIsNewProfileModalOpen(true)} className="p-1.5 hover:bg-indigo-50 text-indigo-600 rounded-xl transition-colors"><PlusCircle className="w-5 h-5" /></button></div>
             {profiles.map(p => (
               <div key={p.id} className="group relative mb-2">
                 <button onClick={() => setActiveProfileId(p.id)} className={`w-full flex items-center gap-4 px-5 py-4 rounded-2xl transition-all font-bold ${activeProfileId === p.id ? 'bg-indigo-600 text-white shadow-xl translate-x-1' : 'text-slate-500 hover:bg-slate-50'}`}>
@@ -464,17 +504,40 @@ const App = () => {
       <main className="flex-1 p-6 md:p-12 overflow-y-auto">
         {activeProfile ? (
           <div className="max-w-6xl mx-auto space-y-10 animate-in fade-in duration-700">
-            <div className="flex justify-between items-end gap-6">
-              <div>
-                <nav className="text-[10px] font-bold text-slate-400 mb-4 uppercase tracking-[0.2em] flex items-center gap-2"><span>DIRECTORY</span><ChevronRight className="w-3 h-3" /><span className="text-indigo-600">{activeProfile.name}</span></nav>
-                <h2 className="text-4xl md:text-5xl font-black text-slate-900 tracking-tighter leading-none">{activeProfile.name}</h2>
+            {!hasApiKey && (
+              <div className="bg-red-50 border border-red-100 rounded-3xl p-6 flex items-center gap-4 animate-in slide-in-from-top-4 duration-500">
+                <div className="p-3 bg-red-100 rounded-2xl text-red-600"><AlertTriangle className="w-6 h-6" /></div>
+                <div className="flex-1">
+                  <h4 className="text-sm font-black text-red-900">AI Features Disabled</h4>
+                  <p className="text-xs font-bold text-red-600/70">Please configure your Google GenAI API Key in Settings to enable automated bill extraction.</p>
+                </div>
+                <button onClick={() => setIsSettingsModalOpen(true)} className="px-5 py-2.5 bg-red-600 text-white text-xs font-black rounded-xl hover:bg-red-700 transition-colors">Setup Now</button>
               </div>
-              <button onClick={() => setIsBulkAddModalOpen(true)} className="px-8 py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-2xl hover:bg-indigo-700 flex items-center gap-3 transition-all hover:-translate-y-1"><Plus className="w-5 h-5" />Add Numbers</button>
+            )}
+
+            <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
+              <div className="flex-1">
+                <nav className="text-[10px] font-bold text-slate-400 mb-4 uppercase tracking-[0.2em] flex items-center gap-2"><span>ACTIVE VAULT</span><ChevronRight className="w-3 h-3" /><span className="text-indigo-600">{activeProfile.name}</span></nav>
+                <h2 className="text-4xl md:text-5xl font-black text-slate-900 tracking-tighter leading-none mb-6">{activeProfile.name}</h2>
+                <div className="relative w-full max-w-md">
+                  <div className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400">
+                    <Search className="w-5 h-5" />
+                  </div>
+                  <input 
+                    type="text" 
+                    placeholder="Search UKSC, Nickname or Tenant..." 
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-14 pr-6 py-5 bg-white border border-slate-100 rounded-[1.8rem] shadow-sm focus:border-indigo-500 outline-none font-bold text-slate-700 transition-all"
+                  />
+                </div>
+              </div>
+              <button onClick={() => setIsBulkAddModalOpen(true)} className="px-8 py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-2xl hover:bg-indigo-700 flex items-center gap-3 transition-all hover:-translate-y-1"><Plus className="w-5 h-5" />Add/Import UKSC IDs</button>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 pb-20">
-              {activeProfile.ukscs.map(uksc => (
-                <div key={uksc.id} className="bg-white rounded-[2.5rem] border border-slate-100 shadow-xl flex flex-col group hover:shadow-2xl transition-all relative overflow-hidden">
+              {filteredUKSCs.map(uksc => (
+                <div key={uksc.id} className="bg-white rounded-[2.5rem] border border-slate-100 shadow-xl flex flex-col group hover:shadow-2xl transition-all relative">
                   <div className="p-8 flex-1 space-y-6">
                     <div className="flex justify-between items-start">
                       <div className="w-14 h-14 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-400 group-hover:bg-indigo-50 group-hover:text-indigo-600 transition-colors"><FileText className="w-7 h-7" /></div>
@@ -485,16 +548,16 @@ const App = () => {
                       <p className="text-xs font-mono font-bold text-slate-400 mt-1 uppercase">UKSC: {uksc.number}</p>
                     </div>
                     {uksc.billData ? (
-                      <div className="p-5 bg-indigo-50/50 rounded-3xl border border-indigo-100/30 space-y-4 shadow-inner">
+                      <div className="p-5 bg-indigo-50/50 rounded-3xl border border-indigo-100/30 space-y-4">
                         <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest text-indigo-400">
                           <span>Month: {uksc.billData.billMonth}</span>
                           <div className={`px-3 py-1 rounded-full ${uksc.billData.status.toLowerCase().includes('paid') && !uksc.billData.status.toLowerCase().includes('unpaid') ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>{uksc.billData.status}</div>
                         </div>
                         <p className="text-3xl font-black text-slate-900 tracking-tight">{uksc.billData.amount}</p>
-                        <p className="text-[10px] font-bold text-slate-400 flex items-center gap-2 italic uppercase"><Clock className="w-3 h-3 text-indigo-300" /> Due: {uksc.billData.dueDate}</p>
+                        <p className="text-[10px] font-bold text-slate-400 flex items-center gap-2 italic uppercase"><Clock className="w-3 h-3 text-indigo-300" /> Fetched: {uksc.billData.lastFetched}</p>
                       </div>
                     ) : (
-                      <div className="p-10 border-2 border-dashed border-slate-50 rounded-[2.2rem] flex flex-col items-center justify-center opacity-40">
+                      <div className="p-10 border-2 border-dashed border-slate-100 rounded-[2.2rem] flex flex-col items-center justify-center opacity-40">
                         <Search className="w-8 h-8 text-slate-300 mb-3" />
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Awaiting Analysis</p>
                       </div>
@@ -503,7 +566,7 @@ const App = () => {
                     {errorLog && loading === uksc.id && <div className="mt-4 p-3 bg-red-50 rounded-xl flex items-center gap-2 text-[10px] font-bold text-red-600 animate-pulse"><AlertCircle className="w-4 h-4" />{errorLog}</div>}
                   </div>
                   <div className="p-6 pt-0 flex gap-2">
-                    <button onClick={() => fetchBillDetails(uksc)} disabled={!!loading || !!exportingId} className="flex-1 flex items-center justify-center gap-3 py-4 rounded-2xl text-xs font-black bg-white text-indigo-600 border border-slate-100 hover:bg-slate-50 disabled:opacity-50 transition-all hover:shadow-md"><Search className="w-4 h-4" />Check</button>
+                    <button onClick={() => fetchBillDetails(uksc)} disabled={!!loading || !!exportingId} className="flex-1 flex items-center justify-center gap-3 py-4 rounded-2xl text-xs font-black bg-white text-indigo-600 border border-slate-100 hover:bg-slate-50 disabled:opacity-50 transition-all shadow-sm"><Search className="w-4 h-4" />Check</button>
                     <button onClick={() => setPreviewUrl((uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number))} className="p-4 bg-slate-50 text-slate-400 rounded-2xl hover:bg-indigo-50 hover:text-indigo-600 transition-colors flex items-center gap-1 group relative overflow-hidden">
                       <Eye className="w-5 h-5" />
                       <ArrowRight className="w-4 h-4 blinking-arrow hidden group-hover:block" />
@@ -514,13 +577,18 @@ const App = () => {
                 </div>
               ))}
             </div>
+            {filteredUKSCs.length === 0 && searchQuery && (
+              <div className="py-20 text-center text-slate-400">
+                <Search className="w-12 h-12 mx-auto mb-4 opacity-20" />
+                <p className="font-bold">No results found for "{searchQuery}"</p>
+              </div>
+            )}
           </div>
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-center p-8">
             <div className="w-24 h-24 bg-white shadow-2xl rounded-[2.5rem] flex items-center justify-center text-indigo-600 mb-10 rotate-3 transition-transform hover:rotate-0"><Plus className="w-12 h-12" /></div>
-            <h2 className="text-4xl font-black text-slate-900 mb-6 tracking-tighter">No Hub Selected</h2>
-            <p className="text-slate-400 max-w-xs mb-10 font-medium">Create or select a property profile to begin managing your electricity bills.</p>
-            <button onClick={() => setIsNewProfileModalOpen(true)} className="px-16 py-6 bg-indigo-600 text-white rounded-[2rem] font-black text-xl shadow-2xl hover:bg-indigo-700 transition-all hover:-translate-y-2 active:scale-95">Initialize Hub</button>
+            <h2 className="text-4xl font-black text-slate-900 mb-6 tracking-tighter">Vault Empty</h2>
+            <button onClick={() => setIsNewProfileModalOpen(true)} className="px-16 py-6 bg-indigo-600 text-white rounded-[2rem] font-black text-xl shadow-2xl hover:bg-indigo-700 transition-all hover:-translate-y-2 active:scale-95">Initialize Vault</button>
           </div>
         )}
       </main>
@@ -528,75 +596,111 @@ const App = () => {
       {/* --- Modals --- */}
       <Modal isOpen={isNewProfileModalOpen} onClose={() => setIsNewProfileModalOpen(false)} title="Initialize Vault">
         <form onSubmit={(e) => { e.preventDefault(); const fd = new FormData(e.currentTarget); handleCreateProfile(fd.get('name') as string, fd.get('type') as ProfileType); }} className="space-y-8">
-          <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Vault Identity</label><input name="name" required placeholder="e.g. Skyline Residency" className="w-full px-6 py-5 bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] focus:border-indigo-500 outline-none font-bold" /></div>
+          <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Vault Label</label><input name="name" required placeholder="Skyline Complex" className="w-full px-6 py-5 bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] focus:border-indigo-500 outline-none font-bold" /></div>
           <div className="grid grid-cols-2 gap-4">
             <label className="cursor-pointer group"><input type="radio" name="type" value={ProfileType.HOME} defaultChecked className="hidden peer" /><div className="flex flex-col items-center p-8 rounded-[2rem] border-4 border-slate-50 bg-slate-50 peer-checked:border-indigo-600 peer-checked:bg-white transition-all shadow-sm"><Home className="w-10 h-10 text-slate-300 peer-checked:text-indigo-600 mb-4" /><span className="text-sm font-black text-slate-600">Home</span></div></label>
-            <label className="cursor-pointer group"><input type="radio" name="type" value={ProfileType.APARTMENT} className="hidden peer" /><div className="flex flex-col items-center p-8 rounded-[2rem] border-4 border-slate-50 bg-slate-50 peer-checked:border-indigo-600 peer-checked:bg-white transition-all shadow-sm"><Building2 className="w-10 h-10 text-slate-300 peer-checked:text-indigo-600 mb-4" /><span className="text-sm font-black text-slate-600">Complex</span></div></label>
+            <label className="cursor-pointer group"><input type="radio" name="type" value={ProfileType.APARTMENT} className="hidden peer" /><div className="flex flex-col items-center p-8 rounded-[2rem] border-4 border-slate-50 bg-slate-50 peer-checked:border-indigo-600 peer-checked:bg-white transition-all shadow-sm"><Building2 className="w-10 h-10 text-slate-300 peer-checked:text-indigo-600 mb-4" /><span className="text-sm font-black text-slate-600">Apartment</span></div></label>
           </div>
-          <button type="submit" className="w-full py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black text-lg shadow-xl hover:bg-indigo-700 transition-all active:scale-95">Initialize & Save</button>
+          <button type="submit" className="w-full py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black text-lg shadow-xl hover:bg-indigo-700 transition-all">Create Vault</button>
         </form>
       </Modal>
 
-      <Modal isOpen={isBulkAddModalOpen} onClose={() => setIsBulkAddModalOpen(false)} title="Bulk Import IDs">
+      <Modal isOpen={isBulkAddModalOpen} onClose={() => setIsBulkAddModalOpen(false)} title="Add/Import UKSC IDs">
         <div className="space-y-8">
-          <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">UKSC Numbers (New line or Comma separated)</label><textarea id="bulkInput" rows={6} placeholder="110390320, 110390321..." className="w-full px-6 py-5 bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] focus:border-indigo-500 outline-none font-mono text-sm font-bold text-slate-700" /></div>
-          <button onClick={() => handleBulkAdd((document.getElementById('bulkInput') as HTMLTextAreaElement).value)} className="w-full py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black text-lg shadow-xl hover:bg-indigo-700 transition-all">Import & Run Auto-Analysis</button>
+          <div className="space-y-3"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">UKSC Numbers (New line or comma)</label><textarea id="bulkInput" rows={6} placeholder="110390320, 110390321..." className="w-full px-6 py-5 bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] focus:border-indigo-500 outline-none font-mono text-sm font-bold text-slate-700" /></div>
+          <button onClick={() => handleBulkAdd((document.getElementById('bulkInput') as HTMLTextAreaElement).value)} className="w-full py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black text-lg shadow-xl hover:bg-indigo-700 transition-all">Import & Auto-Check</button>
         </div>
       </Modal>
 
-      <Modal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} title="Platform Console">
-        <div className="space-y-10">
-          {/* AI ENGINE STATUS - ENVIRONMENT CONFIGURED */}
+      <Modal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} title="Platform Settings">
+        <div className="space-y-10 pb-8">
+          {/* API KEY CONFIG */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 px-2 text-[10px] font-black text-slate-400 uppercase tracking-widest"><Key className="w-4 h-4" />Google GenAI API Key</div>
+            <div className="space-y-3">
+              <div className="relative group">
+                <input 
+                  type={showApiKey ? "text" : "password"}
+                  value={tempApiKey}
+                  onChange={(e) => setTempApiKey(e.target.value)}
+                  placeholder="Enter AI API Key..."
+                  className={`w-full pl-6 pr-14 py-5 bg-slate-50 border-2 rounded-[1.5rem] focus:border-indigo-500 outline-none font-mono text-sm font-bold transition-all ${!tempApiKey && !process.env.API_KEY ? 'border-red-100' : 'border-slate-100'}`}
+                />
+                <button 
+                  onClick={() => setShowApiKey(!showApiKey)}
+                  className="absolute right-5 top-1/2 -translate-y-1/2 p-2 text-slate-300 hover:text-indigo-600 transition-colors"
+                >
+                  {showApiKey ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                </button>
+              </div>
+              <button 
+                onClick={handleSaveApiKey}
+                disabled={isSavingKey}
+                className={`w-full py-4 rounded-2xl font-black text-xs shadow-lg transition-all flex items-center justify-center gap-3 disabled:opacity-50 ${saveSuccess ? 'bg-emerald-500 text-white' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
+              >
+                {isSavingKey ? <Loader2 className="w-4 h-4 animate-spin" /> : (saveSuccess ? <CheckCircle2 className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />)}
+                {isSavingKey ? 'Verifying & Saving...' : (saveSuccess ? 'API Key Saved!' : 'Save API Key')}
+              </button>
+            </div>
+            {!hasApiKey && (
+              <div className="px-3 py-2 bg-red-50 rounded-xl flex items-center gap-2 text-[9px] font-bold text-red-600 animate-pulse">
+                <AlertCircle className="w-3.5 h-3.5" />
+                <span>Extraction will fail without an API key.</span>
+              </div>
+            )}
+          </div>
+
+          {/* AI ENGINE STATUS */}
           <div className="p-8 bg-indigo-600 rounded-[2.5rem] text-white shadow-2xl relative overflow-hidden group">
             <div className="absolute -right-10 -top-10 w-40 h-40 bg-white/10 rounded-full group-hover:scale-110 transition-transform duration-700" />
             <div className="relative z-10 space-y-4">
-              <div className="flex items-center gap-3"><ShieldCheck className="w-8 h-8 text-indigo-200" /><h4 className="text-xl font-black tracking-tight">AI Engine Status</h4></div>
-              <p className="text-sm font-bold text-indigo-100/80 leading-relaxed italic">The Google Gemini Intelligence core is pre-configured via secure system environment variables.</p>
-              <div className="flex items-center gap-2 bg-white/20 px-4 py-2 rounded-xl w-fit"><div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" /><span className="text-[10px] font-black uppercase tracking-widest">Environment Ready</span></div>
+              <div className="flex items-center gap-3"><ShieldCheck className="w-8 h-8 text-indigo-200" /><h4 className="text-xl font-black tracking-tight">AI Status</h4></div>
+              <div className="flex items-center gap-2 bg-white/20 px-4 py-2 rounded-xl w-fit">
+                <div className={`w-2 h-2 rounded-full animate-pulse ${hasApiKey ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                <span className="text-[10px] font-black uppercase tracking-widest">{hasApiKey ? 'Engine Ready' : 'Key Required'}</span>
+              </div>
             </div>
           </div>
 
           {/* AUTO REFRESH CONFIG */}
           <div className="space-y-4 p-6 bg-slate-50 rounded-3xl border border-slate-100 shadow-inner">
-            <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest"><RefreshCw className="w-4 h-4" />Auto-Refresh Sync</div>
+            <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest"><RefreshCw className="w-4 h-4" />Sync Interval</div>
             <div className="grid grid-cols-5 gap-1.5">
               {(['off', '1h', '6h', '12h', '24h'] as RefreshInterval[]).map(val => (
                 <button key={val} onClick={() => setAppSettings({...appSettings, refreshInterval: val})} className={`py-3 rounded-xl font-black text-[10px] transition-all uppercase ${appSettings.refreshInterval === val ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-slate-400 hover:bg-slate-100'}`}>{val}</button>
               ))}
             </div>
-            <p className="text-[9px] text-slate-400 font-bold italic text-center">System will automatically update all UKSC bills in the background at this frequency.</p>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <button onClick={() => { const blob = new Blob([JSON.stringify({profiles, settings: appSettings}, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'PowerBill_Vault_Backup.json'; link.click(); }} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-indigo-50 transition-all shadow-sm hover:shadow-md"><Download className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Export Vault</span></button>
-            <button onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-emerald-50 transition-all shadow-sm hover:shadow-md"><Upload className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Import Vault</span></button>
+            <button onClick={() => { const blob = new Blob([JSON.stringify({profiles, settings: appSettings}, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'PowerBill_Backup.json'; link.click(); }} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-indigo-50 transition-all shadow-sm"><Download className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Export Vault</span></button>
+            <button onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-emerald-50 transition-all shadow-sm"><Upload className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Import Vault</span></button>
           </div>
           <input type="file" ref={fileInputRef} className="hidden" accept=".json" onChange={(e) => {
              const file = e.target.files?.[0];
              if (!file) return;
              const reader = new FileReader();
-             reader.onload = (event) => { try { const p = JSON.parse(event.target?.result as string); setProfiles(p.profiles || []); setAppSettings(p.settings || {refreshInterval: 'off'}); alert("Vault restored successfully."); } catch (err) { alert("Invalid backup file structure."); } };
+             reader.onload = (event) => { try { const p = JSON.parse(event.target?.result as string); setProfiles(p.profiles || []); setAppSettings(p.settings || {refreshInterval: 'off', customApiKey: ''}); setTempApiKey(p.settings?.customApiKey || ''); alert("Vault Restored."); } catch (err) { alert("Invalid backup file."); } };
              reader.readAsText(file);
           }} />
-          <div className="text-center pt-4 border-t border-slate-100 opacity-20"><div className="text-[10px] font-black text-slate-900 uppercase tracking-[0.6em]">POWERBILL MANAGER PREMIER EDITION</div></div>
         </div>
       </Modal>
 
       <Modal isOpen={!!editingUKSC} onClose={() => setEditingUKSC(null)} title="Unit Metadata Panel">
         {editingUKSC && (
           <form onSubmit={(e) => { e.preventDefault(); const fd = new FormData(e.currentTarget); handleUpdateUKSC({ ...editingUKSC, nickname: fd.get('nickname') as string, number: fd.get('number') as string, tenantName: fd.get('tenantName') as string, address: fd.get('address') as string, phone: fd.get('phone') as string, customUrl: fd.get('customUrl') as string }); }} className="space-y-6">
-            <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Nickname / Alias</label><input name="nickname" defaultValue={editingUKSC.nickname} required className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
-            <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Service Number (UKSC)</label><input name="number" defaultValue={editingUKSC.number} required className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-mono font-bold focus:border-indigo-500 outline-none transition-all" /></div>
-            <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Occupant / Tenant Name</label><input name="tenantName" defaultValue={editingUKSC.tenantName} className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
+            <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Alias Name</label><input name="nickname" defaultValue={editingUKSC.nickname} required className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
+            <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">UKSC Number</label><input name="number" defaultValue={editingUKSC.number} required className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-mono font-bold focus:border-indigo-500 outline-none transition-all" /></div>
+            <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Tenant Name</label><input name="tenantName" defaultValue={editingUKSC.tenantName} className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Flat/Plot Number</label><input name="address" defaultValue={editingUKSC.address} className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
-              <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">WhatsApp Number</label><input name="phone" defaultValue={editingUKSC.phone} placeholder="91XXXXXXXXXX" className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
+              <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Plot/Flat No</label><input name="address" defaultValue={editingUKSC.address} className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
+              <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">WhatsApp No</label><input name="phone" defaultValue={editingUKSC.phone} placeholder="91XXXXXXXXXX" className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
             </div>
             <div className="pt-8 flex gap-4">
-              <button type="button" onClick={() => setEditingUKSC(null)} className="flex-1 py-4 text-slate-400 font-black hover:text-slate-600">Discard</button>
-              <button type="submit" className="flex-[2] py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-xl hover:bg-indigo-700 active:scale-95 transition-all">Apply Metadata Changes</button>
+              <button type="button" onClick={() => setEditingUKSC(null)} className="flex-1 py-4 text-slate-400 font-black hover:text-slate-600 transition-colors">Cancel</button>
+              <button type="submit" className="flex-[2] py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-xl hover:bg-indigo-700 active:scale-95 transition-all">Save Changes</button>
             </div>
-            <button type="button" onClick={() => { handleDeleteUKSC(editingUKSC.id); setEditingUKSC(null); }} className="w-full py-4 text-red-400 font-bold hover:bg-red-50 rounded-2xl transition-all flex items-center justify-center gap-2"><Trash2 className="w-4 h-4" /> Remove Unit from Vault</button>
+            <button type="button" onClick={() => { handleDeleteUKSC(editingUKSC.id); setEditingUKSC(null); }} className="w-full py-4 text-red-400 font-bold hover:bg-red-50 rounded-2xl transition-all flex items-center justify-center gap-2"><Trash2 className="w-4 h-4" /> Delete Unit</button>
           </form>
         )}
       </Modal>
