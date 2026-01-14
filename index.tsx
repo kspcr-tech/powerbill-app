@@ -30,7 +30,12 @@ import {
   CheckCircle2,
   AlertTriangle,
   CalendarClock,
-  Contact
+  Contact,
+  Lock,
+  Unlock,
+  Shield,
+  FileJson,
+  ShieldAlert
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -82,12 +87,15 @@ interface Profile {
 interface AppSettings {
   refreshConfig: RefreshConfig;
   customApiKey: string;
+  appPin?: string;
+  isEncrypted?: boolean; // Flag for export/import compatibility
 }
 
 // --- Constants ---
 
 const STORAGE_KEY = 'powerbill_manager_v7_data';
 const DEFAULT_URL_TEMPLATE = 'https://tgsouthernpower.org/billinginfo?ukscno=';
+const ENCRYPTION_SALT = 'POWERBILL_SECURE_VAULT_V1';
 
 const PROXY_LIST = [
   'https://api.allorigins.win/get?url=',
@@ -96,6 +104,68 @@ const PROXY_LIST = [
   'https://thingproxy.freeboard.io/fetch/',
   'https://proxy.cors.sh/'
 ];
+
+// --- Utilities ---
+
+const simpleEncrypt = (text: string | undefined): string => {
+  if (!text) return "";
+  try {
+    const xor = text.split('').map((c, i) => 
+      String.fromCharCode(c.charCodeAt(0) ^ ENCRYPTION_SALT.charCodeAt(i % ENCRYPTION_SALT.length))
+    ).join('');
+    return btoa(xor);
+  } catch (e) {
+    console.error("Encryption failed", e);
+    return "";
+  }
+};
+
+const simpleDecrypt = (cypher: string | undefined): string => {
+  if (!cypher) return "";
+  try {
+    const xor = atob(cypher);
+    return xor.split('').map((c, i) => 
+      String.fromCharCode(c.charCodeAt(0) ^ ENCRYPTION_SALT.charCodeAt(i % ENCRYPTION_SALT.length))
+    ).join('');
+  } catch (e) {
+    console.error("Decryption failed", e);
+    return "";
+  }
+};
+
+const robustFetch = async (targetUrl: string): Promise<string> => {
+  for (const proxy of PROXY_LIST) {
+    try {
+      const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
+      if (res.ok) {
+        if (proxy.includes('allorigins')) {
+          const data = await res.json();
+          if (data.contents) return data.contents;
+        }
+        const text = await res.text();
+        if (text && text.length > 100) return text;
+      }
+    } catch (e) {
+      console.warn(`Proxy failed: ${proxy}`);
+    }
+  }
+  throw new Error("Billing portal unreachable. All network gateways blocked.");
+};
+
+const calculateMilliseconds = (value: number, unit: TimeUnit): number => {
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  switch (unit) {
+    case 'minutes': return value * minute;
+    case 'hours': return value * hour;
+    case 'days': return value * day;
+    case 'weeks': return value * day * 7;
+    case 'months': return value * day * 30;
+    case 'years': return value * day * 365;
+    default: return 0;
+  }
+};
 
 // --- Components ---
 
@@ -119,6 +189,97 @@ const Modal: React.FC<{
           {children}
         </div>
       </div>
+    </div>
+  );
+};
+
+const LockOverlay: React.FC<{ onUnlock: (pin: string) => boolean }> = ({ onUnlock }) => {
+  const [pin, setPin] = useState('');
+  const [error, setError] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (onUnlock(pin)) {
+      setPin('');
+    } else {
+      setError(true);
+      setPin('');
+      setTimeout(() => setError(false), 800);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-slate-900 flex items-center justify-center p-4 animate-in fade-in duration-500">
+      <form onSubmit={handleSubmit} className={`bg-white w-full max-w-sm rounded-[2.5rem] p-10 text-center shadow-2xl space-y-8 ${error ? 'animate-[shake_0.5s_ease-in-out]' : ''}`}>
+        <style>{`@keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-8px); } 75% { transform: translateX(8px); } }`}</style>
+        <div className="w-20 h-20 bg-indigo-600 text-white rounded-[1.5rem] flex items-center justify-center mx-auto shadow-xl shadow-indigo-200 rotate-3">
+           <Lock className="w-10 h-10" />
+        </div>
+        <div>
+          <h2 className="text-3xl font-black text-slate-900 tracking-tight">App Locked</h2>
+          <p className="text-sm text-slate-400 font-bold mt-2">Enter PIN to access Vault</p>
+        </div>
+        <div className="relative">
+          <input 
+             type="password" 
+             inputMode="numeric" 
+             value={pin}
+             autoFocus
+             onChange={(e) => { setPin(e.target.value); setError(false); }}
+             className={`w-full text-center text-4xl tracking-[0.3em] font-black py-4 border-b-4 outline-none transition-colors bg-transparent ${error ? 'border-red-500 text-red-500' : 'border-indigo-100 focus:border-indigo-600 text-slate-800'}`}
+             placeholder="••••"
+             maxLength={8}
+          />
+        </div>
+        <button type="submit" className="w-full py-5 bg-slate-900 hover:bg-indigo-600 text-white rounded-2xl font-black shadow-lg transition-all hover:-translate-y-1 active:scale-95 text-lg">
+          Unlock
+        </button>
+      </form>
+    </div>
+  );
+};
+
+const PinSetupOverlay: React.FC<{ onSetup: (pin: string) => void }> = ({ onSetup }) => {
+  const [pin, setPin] = useState('');
+  const [error, setError] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (pin.length >= 4) {
+      onSetup(pin);
+    } else {
+      setError(true);
+      setTimeout(() => setError(false), 800);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-slate-50 flex items-center justify-center p-4 animate-in fade-in duration-500">
+      <form onSubmit={handleSubmit} className={`bg-white w-full max-w-sm rounded-[2.5rem] p-10 text-center shadow-2xl space-y-8 border border-slate-100 ${error ? 'animate-[shake_0.5s_ease-in-out]' : ''}`}>
+        <style>{`@keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-8px); } 75% { transform: translateX(8px); } }`}</style>
+        <div className="w-20 h-20 bg-emerald-500 text-white rounded-[1.5rem] flex items-center justify-center mx-auto shadow-xl shadow-emerald-200 -rotate-3">
+           <ShieldCheck className="w-10 h-10" />
+        </div>
+        <div>
+          <h2 className="text-3xl font-black text-slate-900 tracking-tight">Vault Setup</h2>
+          <p className="text-sm text-slate-400 font-bold mt-2">Create a Security PIN to continue</p>
+        </div>
+        <div className="relative">
+          <input 
+             type="password" 
+             inputMode="numeric" 
+             value={pin}
+             autoFocus
+             onChange={(e) => { setPin(e.target.value); setError(false); }}
+             className={`w-full text-center text-4xl tracking-[0.3em] font-black py-4 border-b-4 outline-none transition-colors bg-transparent ${error ? 'border-red-500 text-red-500' : 'border-emerald-100 focus:border-emerald-500 text-slate-800'}`}
+             placeholder="••••"
+             maxLength={8}
+          />
+        </div>
+        <button type="submit" className="w-full py-5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl font-black shadow-lg transition-all hover:-translate-y-1 active:scale-95 text-lg">
+          Set PIN
+        </button>
+      </form>
     </div>
   );
 };
@@ -190,42 +351,6 @@ const PortalPreview: React.FC<{ url: string; onClose: () => void }> = ({ url, on
   );
 };
 
-// --- Utilities ---
-
-const robustFetch = async (targetUrl: string): Promise<string> => {
-  for (const proxy of PROXY_LIST) {
-    try {
-      const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
-      if (res.ok) {
-        if (proxy.includes('allorigins')) {
-          const data = await res.json();
-          if (data.contents) return data.contents;
-        }
-        const text = await res.text();
-        if (text && text.length > 100) return text;
-      }
-    } catch (e) {
-      console.warn(`Proxy failed: ${proxy}`);
-    }
-  }
-  throw new Error("Billing portal unreachable. All network gateways blocked.");
-};
-
-const calculateMilliseconds = (value: number, unit: TimeUnit): number => {
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  switch (unit) {
-    case 'minutes': return value * minute;
-    case 'hours': return value * hour;
-    case 'days': return value * day;
-    case 'weeks': return value * day * 7;
-    case 'months': return value * day * 30;
-    case 'years': return value * day * 365;
-    default: return 0;
-  }
-};
-
 // --- App Root Component ---
 
 const App = () => {
@@ -238,10 +363,13 @@ const App = () => {
     customApiKey: '' 
   });
 
+  const [isStorageLoaded, setIsStorageLoaded] = useState(false);
+  const [isLocked, setIsLocked] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [isNewProfileModalOpen, setIsNewProfileModalOpen] = useState(false);
   const [isBulkAddModalOpen, setIsBulkAddModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
   const [editingUKSC, setEditingUKSC] = useState<UKSCNumber | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
@@ -255,6 +383,9 @@ const App = () => {
   const [tempApiKey, setTempApiKey] = useState('');
   const [isSavingKey, setIsSavingKey] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  
+  // States for PIN Management
+  const [tempPin, setTempPin] = useState('');
 
   // STRICT API KEY POLICY: Only use the key from settings.
   const hasApiKey = useMemo(() => !!appSettings.customApiKey, [appSettings.customApiKey]);
@@ -280,31 +411,37 @@ const App = () => {
            }
            loadedSettings = {
              customApiKey: parsed.settings.customApiKey || '',
-             refreshConfig: config
+             refreshConfig: config,
+             appPin: parsed.settings.appPin
            };
         } else if (parsed.settings?.refreshConfig) {
           loadedSettings = parsed.settings;
         } else {
           loadedSettings = { 
             refreshConfig: { enabled: false, value: 6, unit: 'hours' }, 
-            customApiKey: parsed.settings?.customApiKey || '' 
+            customApiKey: parsed.settings?.customApiKey || '',
+            appPin: parsed.settings?.appPin
           };
         }
 
         setProfiles(parsed.profiles || []);
         setAppSettings(loadedSettings);
         setTempApiKey(loadedSettings.customApiKey || '');
+        if (loadedSettings.appPin) setIsLocked(true);
         if (parsed.profiles?.length > 0) setActiveProfileId(parsed.profiles[0].id);
       } catch (e) {
         console.error("Data Load Error", e);
       }
     }
+    setIsStorageLoaded(true);
   }, []);
 
   // Persist State
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ profiles, settings: appSettings }));
-  }, [profiles, appSettings]);
+    if (isStorageLoaded) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ profiles, settings: appSettings }));
+    }
+  }, [profiles, appSettings, isStorageLoaded]);
 
   const activeProfile = useMemo(() => 
     profiles.find(p => p.id === activeProfileId) || null
@@ -326,6 +463,19 @@ const App = () => {
     return profiles.some(profile => 
       profile.ukscs.some(uksc => uksc.number === number && uksc.id !== excludeId)
     );
+  };
+
+  const handleUnlock = (pin: string) => {
+    if (pin === appSettings.appPin) {
+      setIsLocked(false);
+      return true;
+    }
+    return false;
+  };
+  
+  const handleInitialSetup = (pin: string) => {
+    setAppSettings(prev => ({ ...prev, appPin: pin }));
+    setIsLocked(true); // Force unlock after setup
   };
 
   const fetchBillDetails = async (uksc: UKSCNumber) => {
@@ -382,7 +532,18 @@ const App = () => {
       setProgress(100);
     } catch (err: any) {
       console.error(err);
-      setErrorLog("AI Analysis Failed. Check Quota.");
+      
+      // Smart Error Parsing for Quota
+      let msg = "AI Analysis Failed. Check Details.";
+      const errMsg = err.message?.toLowerCase() || '';
+      
+      if (errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('resource exhausted')) {
+        msg = "⚠️ API Quota Exceeded (429). Please retry in ~30s.";
+      } else if (errMsg.includes('key')) {
+        msg = "Invalid API Key. Check settings.";
+      }
+
+      setErrorLog(msg);
     }
 
     // Manual delay ensuring sequential visual completion and avoiding race conditions with 'loading' state
@@ -411,7 +572,8 @@ const App = () => {
             setTempApiKey('');
             setActiveProfileId(null);
             setIsSettingsModalOpen(false);
-            alert("Application data reset successfully.");
+            setIsSecurityModalOpen(false);
+            // This will naturally trigger the !appPin check in render, showing Setup Overlay
         }
     }
   };
@@ -435,6 +597,69 @@ const App = () => {
     } catch (e) {
       console.error("Contact pick failed:", e);
     }
+  };
+  
+  // Encrypted Export Logic
+  const handleExportVault = () => {
+      const exportSettings = {
+          ...appSettings,
+          isEncrypted: true,
+          customApiKey: simpleEncrypt(appSettings.customApiKey),
+          appPin: simpleEncrypt(appSettings.appPin)
+      };
+      
+      const blob = new Blob([JSON.stringify({ profiles, settings: exportSettings }, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `PowerBill_Backup_Encrypted_${new Date().toISOString().slice(0,10)}.json`;
+      link.click();
+  };
+  
+  // Encrypted Import Logic
+  const handleImportVault = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+            const p = JSON.parse(event.target?.result as string);
+            const importedSettings = p.settings || {};
+            
+            let finalSettings: AppSettings;
+            
+            if (importedSettings.isEncrypted) {
+                // Decrypt
+                finalSettings = {
+                    ...importedSettings,
+                    customApiKey: simpleDecrypt(importedSettings.customApiKey),
+                    appPin: simpleDecrypt(importedSettings.appPin)
+                };
+            } else {
+                // Legacy / Plain text load
+                finalSettings = { 
+                    customApiKey: importedSettings.customApiKey || '', 
+                    refreshConfig: importedSettings.refreshConfig || { enabled: false, value: 6, unit: 'hours' },
+                    appPin: importedSettings.appPin
+                };
+            }
+            
+            setProfiles(p.profiles || []);
+            setAppSettings(finalSettings);
+            setTempApiKey(finalSettings.customApiKey);
+            
+            // If import has a PIN, lock app to force auth.
+            if (finalSettings.appPin) {
+                setIsLocked(true);
+            }
+            
+            alert("Vault Restored & Decrypted Successfully.");
+        } catch (err) {
+            alert("Invalid backup file or corruption detected.");
+        }
+      };
+      reader.readAsText(file);
+      // Reset input
+      if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   // Background Refresh Logic
@@ -652,6 +877,26 @@ const App = () => {
     setProgress(0);
   };
 
+  // --- RENDER GATES ---
+
+  if (!isStorageLoaded) {
+    return (
+      <div className="min-h-screen bg-[#fcfdfe] flex items-center justify-center">
+        <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
+      </div>
+    );
+  }
+
+  // FORCE PIN SETUP: If no PIN exists, user MUST set one.
+  if (!appSettings.appPin) {
+    return <PinSetupOverlay onSetup={handleInitialSetup} />;
+  }
+
+  // LOCKED STATE: If locked (happens on load or after setup), user MUST unlock.
+  if (isLocked) {
+    return <LockOverlay onUnlock={handleUnlock} />;
+  }
+
   if (previewUrl) {
     return <PortalPreview url={previewUrl} onClose={() => setPreviewUrl(null)} />;
   }
@@ -662,11 +907,17 @@ const App = () => {
         @keyframes blink-arrow { 0%, 100% { opacity: 1; transform: translateX(0); } 50% { opacity: 0.2; transform: translateX(6px); } }
         .blinking-arrow { animation: blink-arrow 0.6s infinite ease-in-out; }
       `}</style>
-
-      <button onClick={() => setIsSettingsModalOpen(true)} className={`fixed top-6 right-6 z-50 p-4 bg-white border border-slate-200 rounded-2xl shadow-xl text-slate-400 hover:text-indigo-600 transition-all hover:scale-105 active:scale-95 ${!hasApiKey ? 'ring-4 ring-red-100' : ''}`}>
-        <Settings className="w-6 h-6" />
-        {!hasApiKey && <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full border-2 border-white" />}
-      </button>
+      
+      <div className="fixed top-6 right-6 z-50 flex gap-3">
+          <button onClick={() => setIsSecurityModalOpen(true)} className={`p-4 bg-white border border-slate-200 rounded-2xl shadow-xl hover:text-indigo-600 transition-all hover:scale-105 active:scale-95 ${appSettings.appPin ? 'text-indigo-600' : 'text-slate-400'}`}>
+            <Shield className="w-6 h-6" />
+          </button>
+          
+          <button onClick={() => setIsSettingsModalOpen(true)} className={`p-4 bg-white border border-slate-200 rounded-2xl shadow-xl text-slate-400 hover:text-indigo-600 transition-all hover:scale-105 active:scale-95 ${!hasApiKey ? 'ring-4 ring-red-100' : ''}`}>
+            <Settings className="w-6 h-6" />
+            {!hasApiKey && <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full border-2 border-white" />}
+          </button>
+      </div>
 
       <aside className="w-full md:w-80 bg-white border-r border-slate-100 flex flex-col h-auto md:h-screen sticky top-0 z-30 shadow-sm">
         <div className="p-8">
@@ -818,6 +1069,43 @@ const App = () => {
         </div>
       </Modal>
 
+      {/* --- NEW SECURITY MODAL --- */}
+      <Modal isOpen={isSecurityModalOpen} onClose={() => setIsSecurityModalOpen(false)} title="Security & Access">
+          <div className="space-y-6">
+             <div className="p-8 bg-slate-50 border border-slate-100 rounded-[2.5rem] text-center space-y-6">
+                <div className="w-20 h-20 bg-white rounded-full mx-auto flex items-center justify-center shadow-lg text-indigo-600">
+                    {appSettings.appPin ? <Lock className="w-10 h-10" /> : <Unlock className="w-10 h-10 text-slate-400" />}
+                </div>
+                <div>
+                    <h3 className="text-xl font-black text-slate-900 tracking-tight">App Lock Status</h3>
+                    <p className={`text-sm font-bold mt-1 ${appSettings.appPin ? 'text-emerald-600' : 'text-slate-400'}`}>
+                        {appSettings.appPin ? 'Active & Secure' : 'No PIN Set'}
+                    </p>
+                </div>
+                
+                {appSettings.appPin ? (
+                    <button 
+                      onClick={() => setAppSettings(prev => ({...prev, appPin: undefined}))}
+                      className="w-full py-4 bg-red-50 text-red-600 font-bold rounded-2xl hover:bg-red-100 transition-colors"
+                    >
+                      Remove PIN Code
+                    </button>
+                ) : (
+                   <div className="space-y-4">
+                     <p className="text-xs text-red-500 font-bold bg-red-50 p-2 rounded-lg">Setup Required on Main Screen</p>
+                   </div>
+                )}
+             </div>
+             
+             <div className="flex items-start gap-3 p-4 bg-blue-50 rounded-2xl text-blue-700">
+                <Shield className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                <p className="text-xs font-medium leading-relaxed">
+                    Setting a PIN encrypts your App Data exports automatically. You must use this app to decrypt and import them back.
+                </p>
+             </div>
+          </div>
+      </Modal>
+
       <Modal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} title="Platform Settings">
         <div className="space-y-10 pb-8">
           {/* API KEY CONFIG */}
@@ -914,16 +1202,10 @@ const App = () => {
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <button onClick={() => { const blob = new Blob([JSON.stringify({profiles, settings: appSettings}, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'PowerBill_Backup.json'; link.click(); }} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-indigo-50 transition-all shadow-sm"><Upload className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Export Vault</span></button>
+            <button onClick={handleExportVault} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-indigo-50 transition-all shadow-sm"><Upload className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Export Vault</span></button>
             <button onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-emerald-50 transition-all shadow-sm"><Download className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Import Vault</span></button>
           </div>
-          <input type="file" ref={fileInputRef} className="hidden" accept=".json" onChange={(e) => {
-             const file = e.target.files?.[0];
-             if (!file) return;
-             const reader = new FileReader();
-             reader.onload = (event) => { try { const p = JSON.parse(event.target?.result as string); setProfiles(p.profiles || []); setAppSettings({ customApiKey: p.settings?.customApiKey || '', refreshConfig: p.settings?.refreshConfig || { enabled: false, value: 6, unit: 'hours' } }); setTempApiKey(p.settings?.customApiKey || ''); alert("Vault Restored."); } catch (err) { alert("Invalid backup file."); } };
-             reader.readAsText(file);
-          }} />
+          <input type="file" ref={fileInputRef} className="hidden" accept=".json" onChange={handleImportVault} />
 
           {/* DANGER ZONE */}
           <div className="pt-6 border-t border-slate-100 mt-6">
