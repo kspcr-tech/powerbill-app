@@ -12,28 +12,43 @@
       font-family: 'Inter', sans-serif;
       background-color: #f8fafc;
     }
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #e2e8f0;
+      border-radius: 10px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #cbd5e1;
+    }
   </style>
 
-      <!-- Babel Standalone for static hosting -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Babel Standalone for static hosting -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-<script type="importmap">
+  <script type="importmap">
 {
   "imports": {
     "react": "https://esm.sh/react@^19.2.3",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "react/": "https://esm.sh/react@^19.2.3/",
-    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
+    "react-dom": "https://esm.sh/react-dom@^19.2.3",
+    "react-dom/client": "https://esm.sh/react-dom@^19.2.3/client",
+    "lucide-react": "https://esm.sh/lucide-react@^0.462.0",
     "@google/genai": "https://esm.sh/@google/genai@^1.35.0",
     "jspdf-autotable": "https://esm.sh/jspdf-autotable@^5.0.7",
-    "jspdf": "https://esm.sh/jspdf@^4.0.0"
+    "jspdf": "https://esm.sh/jspdf@^4.0.0",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/"
   }
 }
 </script>
 </head>
-  <body>
-    <div id="root"></div>
-    <!-- Load the app logic using Babel to compile TSX on the fly -->
-    <script type="text/babel" data-type="module" data-presets="react,typescript" src="./index.tsx"></script>
-  </body>
+<body>
+  <div id="root"></div>
+  <!-- Consolidated app logic -->
+  <script type="text/babel" data-type="module" data-presets="react,typescript" src="./index.tsx"></script>
+</body>
 </html>
