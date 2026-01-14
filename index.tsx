@@ -35,19 +35,6 @@ import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { GoogleGenAI, Type } from "@google/genai";
 
-// --- Safe Environment Access ---
-// Polyfill to prevent "ReferenceError: process is not defined" in browser
-const getEnvApiKey = () => {
-  try {
-    if (typeof process !== 'undefined' && process.env) {
-      return process.env.API_KEY || '';
-    }
-  } catch (e) {
-    // ignore errors in strict environments
-  }
-  return '';
-};
-
 // --- Types & Interfaces ---
 
 enum ProfileType {
@@ -191,7 +178,8 @@ const App = () => {
   const [isSavingKey, setIsSavingKey] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  const hasApiKey = useMemo(() => !!(appSettings.customApiKey || getEnvApiKey()), [appSettings.customApiKey]);
+  // STRICT API KEY POLICY: Only use the key from settings.
+  const hasApiKey = useMemo(() => !!appSettings.customApiKey, [appSettings.customApiKey]);
 
   // Load Initial Data
   useEffect(() => {
@@ -238,10 +226,10 @@ const App = () => {
   };
 
   const fetchBillDetails = async (uksc: UKSCNumber) => {
-    const apiKeyToUse = appSettings.customApiKey || getEnvApiKey();
+    const apiKeyToUse = appSettings.customApiKey;
     
     if (!apiKeyToUse) {
-      setErrorLog("Google GenAI API Key is missing. Check Settings.");
+      setErrorLog("Settings API Key is missing. Please configure it.");
       setIsSettingsModalOpen(true);
       return;
     }
@@ -256,8 +244,9 @@ const App = () => {
       setProgress(50);
 
       const ai = new GoogleGenAI({ apiKey: apiKeyToUse });
+      // Switched to 'gemini-3-flash-preview' for higher rate limits and speed
       const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
+        model: 'gemini-3-flash-preview',
         contents: [
           { text: `Parse the electricity bill HTML for UKSC: ${uksc.number}. Extract: consumerName, billMonth, dueDate, amount, units, and status (Paid/Unpaid). Output JSON only.` },
           { text: `Source HTML Snippet:\n${rawHtml.substring(0, 45000)}` }
@@ -289,7 +278,8 @@ const App = () => {
       })));
       setProgress(100);
     } catch (err: any) {
-      setErrorLog(err.message || "AI Extraction error.");
+      console.error(err);
+      setErrorLog("AI Analysis Failed. Check Quota.");
     } finally {
       setTimeout(() => {
         setLoading(null);
@@ -687,7 +677,7 @@ const App = () => {
                   value={tempApiKey}
                   onChange={(e) => setTempApiKey(e.target.value)}
                   placeholder="Enter AI API Key..."
-                  className={`w-full pl-6 pr-14 py-5 bg-slate-50 border-2 rounded-[1.5rem] focus:border-indigo-500 outline-none font-mono text-sm font-bold transition-all ${!tempApiKey && !getEnvApiKey() ? 'border-red-100' : 'border-slate-100'}`}
+                  className={`w-full pl-6 pr-14 py-5 bg-slate-50 border-2 rounded-[1.5rem] focus:border-indigo-500 outline-none font-mono text-sm font-bold transition-all ${!tempApiKey && !appSettings.customApiKey ? 'border-red-100' : 'border-slate-100'}`}
                 />
                 <button 
                   onClick={() => setShowApiKey(!showApiKey)}
