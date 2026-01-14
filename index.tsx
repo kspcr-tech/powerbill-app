@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
 import { 
@@ -30,7 +29,8 @@ import {
   Key,
   CheckCircle2,
   AlertTriangle,
-  CalendarClock
+  CalendarClock,
+  Contact
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -383,11 +383,57 @@ const App = () => {
     } catch (err: any) {
       console.error(err);
       setErrorLog("AI Analysis Failed. Check Quota.");
-    } finally {
-      setTimeout(() => {
-        setLoading(null);
-        setProgress(0);
-      }, 800);
+    }
+
+    // Manual delay ensuring sequential visual completion and avoiding race conditions with 'loading' state
+    await new Promise(resolve => setTimeout(resolve, 800));
+    setLoading(null);
+    setProgress(0);
+  };
+
+  const handleCheckAll = async () => {
+    if (loading) return; 
+    
+    for (const p of profiles) {
+        for (const u of p.ukscs) {
+            await fetchBillDetails(u);
+        }
+    }
+    alert("Sync completed for all vaults.");
+  };
+
+  const handleDeleteAllData = () => {
+    if (confirm("DANGER: Are you sure you want to delete ALL profiles and settings? This wipes the app completely.")) {
+        if (confirm("Double Confirmation: This action CANNOT be undone. Proceed?")) {
+            localStorage.removeItem(STORAGE_KEY);
+            setProfiles([]);
+            setAppSettings({ refreshConfig: { enabled: false, value: 6, unit: 'hours' }, customApiKey: '' });
+            setTempApiKey('');
+            setActiveProfileId(null);
+            setIsSettingsModalOpen(false);
+            alert("Application data reset successfully.");
+        }
+    }
+  };
+
+  const handlePickContact = async () => {
+    try {
+      if ('contacts' in navigator && 'ContactsManager' in window) {
+         // @ts-ignore
+         const contacts = await navigator.contacts.select(['name', 'tel'], { multiple: false });
+         if (contacts.length) {
+            const { name, tel } = contacts[0];
+            setEditingUKSC(prev => prev ? ({
+               ...prev,
+               tenantName: name?.[0] || prev.tenantName,
+               phone: tel?.[0] || prev.phone
+            }) : null);
+         }
+      } else {
+        alert("Contact Picker API not supported on this device. Please enter details manually.");
+      }
+    } catch (e) {
+      console.error("Contact pick failed:", e);
     }
   };
 
@@ -402,7 +448,6 @@ const App = () => {
       for (const p of profiles) {
         for (const u of p.ukscs) {
           await fetchBillDetails(u);
-          await new Promise(r => setTimeout(r, 2000));
         }
       }
     }, intervalMs);
@@ -675,7 +720,13 @@ const App = () => {
                   />
                 </div>
               </div>
-              <button onClick={() => setIsBulkAddModalOpen(true)} className="px-8 py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-2xl hover:bg-indigo-700 flex items-center gap-3 transition-all hover:-translate-y-1"><Plus className="w-5 h-5" />Add/Import UKSC IDs</button>
+              <div className="flex flex-col sm:flex-row gap-4">
+                 <button onClick={handleCheckAll} disabled={!!loading} className="px-6 py-5 bg-emerald-500 text-white rounded-2xl font-black shadow-2xl hover:bg-emerald-600 flex items-center gap-3 transition-all hover:-translate-y-1 disabled:opacity-50 disabled:hover:translate-y-0 disabled:shadow-none">
+                    <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+                    Sync All
+                 </button>
+                 <button onClick={() => setIsBulkAddModalOpen(true)} className="px-8 py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-2xl hover:bg-indigo-700 flex items-center gap-3 transition-all hover:-translate-y-1"><Plus className="w-5 h-5" />Add/Import</button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 pb-20">
@@ -863,8 +914,8 @@ const App = () => {
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <button onClick={() => { const blob = new Blob([JSON.stringify({profiles, settings: appSettings}, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'PowerBill_Backup.json'; link.click(); }} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-indigo-50 transition-all shadow-sm"><Download className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Export Vault</span></button>
-            <button onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-emerald-50 transition-all shadow-sm"><Upload className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Import Vault</span></button>
+            <button onClick={() => { const blob = new Blob([JSON.stringify({profiles, settings: appSettings}, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'PowerBill_Backup.json'; link.click(); }} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-indigo-50 transition-all shadow-sm"><Upload className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Export Vault</span></button>
+            <button onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center gap-3 p-6 bg-slate-50 border border-slate-100 rounded-[2rem] hover:bg-emerald-50 transition-all shadow-sm"><Download className="w-6 h-6 text-slate-400" /><span className="text-sm font-black text-slate-600">Import Vault</span></button>
           </div>
           <input type="file" ref={fileInputRef} className="hidden" accept=".json" onChange={(e) => {
              const file = e.target.files?.[0];
@@ -873,15 +924,35 @@ const App = () => {
              reader.onload = (event) => { try { const p = JSON.parse(event.target?.result as string); setProfiles(p.profiles || []); setAppSettings({ customApiKey: p.settings?.customApiKey || '', refreshConfig: p.settings?.refreshConfig || { enabled: false, value: 6, unit: 'hours' } }); setTempApiKey(p.settings?.customApiKey || ''); alert("Vault Restored."); } catch (err) { alert("Invalid backup file."); } };
              reader.readAsText(file);
           }} />
+
+          {/* DANGER ZONE */}
+          <div className="pt-6 border-t border-slate-100 mt-6">
+             <div className="bg-red-50 rounded-3xl p-6 border border-red-100 space-y-4">
+               <div className="flex items-center gap-2 text-red-600">
+                  <AlertTriangle className="w-5 h-5" />
+                  <span className="text-xs font-black uppercase tracking-widest">Danger Zone</span>
+               </div>
+               <p className="text-xs font-medium text-red-600/70 leading-relaxed">Permanently delete all vaults, bill history, and API settings. This action is irreversible.</p>
+               <button onClick={handleDeleteAllData} className="w-full py-4 bg-white border border-red-200 text-red-600 rounded-2xl font-black text-xs hover:bg-red-600 hover:text-white transition-colors shadow-sm">Delete All Data</button>
+             </div>
+          </div>
         </div>
       </Modal>
 
       <Modal isOpen={!!editingUKSC} onClose={() => setEditingUKSC(null)} title="Unit Metadata Panel">
         {editingUKSC && (
-          <form onSubmit={(e) => { e.preventDefault(); const fd = new FormData(e.currentTarget); handleUpdateUKSC({ ...editingUKSC, nickname: fd.get('nickname') as string, number: fd.get('number') as string, tenantName: fd.get('tenantName') as string, address: fd.get('address') as string, phone: fd.get('phone') as string, customUrl: fd.get('customUrl') as string }); }} className="space-y-6">
+          <form key={JSON.stringify(editingUKSC)} onSubmit={(e) => { e.preventDefault(); const fd = new FormData(e.currentTarget); handleUpdateUKSC({ ...editingUKSC, nickname: fd.get('nickname') as string, number: fd.get('number') as string, tenantName: fd.get('tenantName') as string, address: fd.get('address') as string, phone: fd.get('phone') as string, customUrl: fd.get('customUrl') as string }); }} className="space-y-6">
             <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Alias Name</label><input name="nickname" defaultValue={editingUKSC.nickname} required className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
             <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">UKSC Number</label><input name="number" defaultValue={editingUKSC.number} required className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-mono font-bold focus:border-indigo-500 outline-none transition-all" /></div>
-            <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Tenant Name</label><input name="tenantName" defaultValue={editingUKSC.tenantName} className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
+            <div className="space-y-2">
+               <div className="flex justify-between items-center">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Tenant Name</label>
+                  <button type="button" onClick={handlePickContact} className="flex items-center gap-1 text-[10px] font-bold text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded-lg transition-colors">
+                    <Contact className="w-3 h-3" /> Pick from Contacts
+                  </button>
+               </div>
+               <input name="tenantName" defaultValue={editingUKSC.tenantName} className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" />
+            </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Plot/Flat No</label><input name="address" defaultValue={editingUKSC.address} className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
               <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">WhatsApp No</label><input name="phone" defaultValue={editingUKSC.phone} placeholder="91XXXXXXXXXX" className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold focus:border-indigo-500 outline-none transition-all" /></div>
