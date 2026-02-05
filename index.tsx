@@ -837,34 +837,27 @@ const App = () => {
     
     setExportingId(uksc.id);
 
-    // Try sharing the actual PDF file via Web Share API (Mobile)
     try {
-      if (navigator.canShare && navigator.share) {
-         const doc = generatePDFDoc(uksc);
-         const pdfBlob = doc.output('blob');
-         const file = new File([pdfBlob], `Bill_${uksc.number}.pdf`, { type: 'application/pdf' });
-         if (navigator.canShare({ files: [file] })) {
-            await navigator.share({
-              files: [file],
-              title: `Bill Report - ${uksc.nickname}`,
-              text: `Here is the electricity bill summary for ${uksc.nickname}.`
-            });
-            setExportingId(null);
-            return;
-         }
-      }
+      // 1. Generate & Download PDF (User must attach this manually as web apps cannot attach files to WhatsApp URL)
+      const doc = generatePDFDoc(uksc);
+      doc.save(`Bill_${uksc.number}.pdf`);
+      
+      // 2. Prepare Text Summary
+      const text = `*POWERBILL SUMMARY REPORT*\n---------------------------\n*Property:* ${activeProfile?.name}\n*Unit Alias:* ${uksc.nickname}\n*UKSC ID:* ${uksc.number}\n*Occupant:* ${uksc.tenantName || 'N/A'}\n*Address:* ${uksc.address || 'N/A'}\n\n*BILL DETAILS*\n*Month:* ${uksc.billData?.billMonth || 'N/A'}\n*Amount:* ${uksc.billData?.amount || 'N/A'}\n*Due Date:* ${uksc.billData?.dueDate || 'N/A'}\n*Status:* ${uksc.billData?.status || 'N/A'}\n\n_Official Portal Access:_\n${(uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number)}`;
+
+      let phone = uksc.phone.replace(/\D/g, '');
+      phone = phone.startsWith('91') ? phone : `91${phone}`;
+      
+      // 3. Open WhatsApp specific chat
+      setTimeout(() => {
+        window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
+        setExportingId(null);
+      }, 1500);
+      
     } catch (e) {
-      console.log("File share not supported or cancelled, falling back to text link.");
+      console.error("Share failed", e);
+      setExportingId(null);
     }
-
-    // Fallback to Text Link sharing
-    const text = `*POWERBILL SUMMARY REPORT*\n---------------------------\n*Property:* ${activeProfile?.name}\n*Unit Alias:* ${uksc.nickname}\n*UKSC ID:* ${uksc.number}\n*Occupant:* ${uksc.tenantName || 'N/A'}\n*Address:* ${uksc.address || 'N/A'}\n\n*BILL DETAILS*\n*Month:* ${uksc.billData?.billMonth || 'N/A'}\n*Amount:* ${uksc.billData?.amount || 'N/A'}\n*Due Date:* ${uksc.billData?.dueDate || 'N/A'}\n*Status:* ${uksc.billData?.status || 'N/A'}\n\n_Official Portal Access:_\n${(uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number)}`;
-
-    let phone = uksc.phone.replace(/\D/g, '');
-    phone = phone.startsWith('91') ? phone : `91${phone}`;
-    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
-    
-    setExportingId(null);
   };
 
   // --- RENDER GATES ---
