@@ -284,22 +284,13 @@ const PinSetupOverlay: React.FC<{ onSetup: (pin: string) => void }> = ({ onSetup
   );
 };
 
-const ProgressBar: React.FC<{ progress: number; label: string }> = ({ progress, label }) => {
-  return (
-    <div className="w-full mt-4 space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
-      <div className="flex justify-between items-center px-1">
-        <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">{label}</span>
-        <span className="text-[10px] font-black text-slate-400">{progress}%</span>
-      </div>
-      <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-        <div 
-          className="h-full bg-indigo-600 rounded-full transition-all duration-700 ease-in-out shadow-[0_0_12px_rgba(79,70,229,0.5)]"
-          style={{ width: `${progress}%` }}
-        />
-      </div>
-    </div>
-  );
-};
+// Simplified loader for parallel requests
+const CompactLoader: React.FC<{ label?: string }> = ({ label }) => (
+  <div className="mt-4 p-3 bg-indigo-50/50 rounded-xl flex items-center justify-center gap-2 animate-pulse">
+    <Loader2 className="w-4 h-4 text-indigo-600 animate-spin" />
+    <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">{label || 'Processing...'}</span>
+  </div>
+);
 
 const PortalPreview: React.FC<{ url: string; onClose: () => void }> = ({ url, onClose }) => {
   const [scale, setScale] = useState(1);
@@ -372,9 +363,11 @@ const App = () => {
   const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
   const [editingUKSC, setEditingUKSC] = useState<UKSCNumber | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState<string | null>(null);
+  
+  // Changed loading to a Set for parallel tracking
+  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
+  
   const [exportingId, setExportingId] = useState<string | null>(null);
-  const [progress, setProgress] = useState<number>(0);
   const [errorLog, setErrorLog] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -487,15 +480,12 @@ const App = () => {
       return;
     }
 
-    setLoading(uksc.id);
-    setProgress(5);
+    setLoadingIds(prev => { const n = new Set(prev); n.add(uksc.id); return n; });
     setErrorLog(null);
     try {
       const finalUrl = (uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number);
-      setProgress(25);
       const rawHtml = await robustFetch(finalUrl);
-      setProgress(50);
-
+      
       const ai = new GoogleGenAI({ apiKey: apiKeyToUse });
       // Switched to 'gemini-3-flash-preview' for higher rate limits and speed
       const response = await ai.models.generateContent({
@@ -521,7 +511,6 @@ const App = () => {
         }
       });
 
-      setProgress(90);
       const data = JSON.parse(response.text || '{}');
       const billData: BillData = { ...data, lastFetched: new Date().toLocaleString() };
 
@@ -529,7 +518,6 @@ const App = () => {
         ...p,
         ukscs: p.ukscs.map(u => u.id === uksc.id ? { ...u, billData } : u)
       })));
-      setProgress(100);
     } catch (err: any) {
       console.error(err);
       
@@ -544,23 +532,28 @@ const App = () => {
       }
 
       setErrorLog(msg);
+    } finally {
+        setLoadingIds(prev => { const n = new Set(prev); n.delete(uksc.id); return n; });
     }
-
-    // Manual delay ensuring sequential visual completion and avoiding race conditions with 'loading' state
-    await new Promise(resolve => setTimeout(resolve, 800));
-    setLoading(null);
-    setProgress(0);
   };
 
   const handleCheckAll = async () => {
-    if (loading) return; 
+    if (loadingIds.size > 0) return; 
     
-    for (const p of profiles) {
-        for (const u of p.ukscs) {
-            await fetchBillDetails(u);
-        }
-    }
-    alert("Sync completed for all vaults.");
+    // Parallel Execution of all units across all profiles
+    const allTasks: Promise<void>[] = [];
+    
+    profiles.forEach(p => {
+        p.ukscs.forEach(u => {
+            allTasks.push(fetchBillDetails(u));
+        });
+    });
+
+    if (allTasks.length === 0) return;
+
+    await Promise.allSettled(allTasks);
+    // Removed the alert as it might interrupt if sync happens in background. 
+    // Or we can show a temporary toast, but for now just silence is golden.
   };
 
   const handleDeleteAllData = () => {
@@ -670,11 +663,14 @@ const App = () => {
     if (intervalMs <= 0) return;
 
     const timer = setInterval(async () => {
+      // Parallel background refresh
+      const allTasks: Promise<void>[] = [];
       for (const p of profiles) {
         for (const u of p.ukscs) {
-          await fetchBillDetails(u);
+           allTasks.push(fetchBillDetails(u));
         }
       }
+      if (allTasks.length > 0) Promise.allSettled(allTasks);
     }, intervalMs);
 
     return () => clearInterval(timer);
@@ -831,19 +827,15 @@ const App = () => {
 
   const handleDownloadPDF = async (uksc: UKSCNumber) => {
     setExportingId(uksc.id);
-    setProgress(5);
     const doc = generatePDFDoc(uksc);
-    setProgress(95);
     doc.save(`PowerBill_${uksc.number}.pdf`);
-    setProgress(100);
-    setTimeout(() => { setExportingId(null); setProgress(0); }, 800);
+    setTimeout(() => { setExportingId(null); }, 800);
   };
 
   const handleShareWhatsApp = async (uksc: UKSCNumber) => {
     if (!uksc.phone) return alert("Please set a WhatsApp number for this unit.");
     
     setExportingId(uksc.id);
-    setProgress(10);
 
     // Try sharing the actual PDF file via Web Share API (Mobile)
     try {
@@ -858,7 +850,6 @@ const App = () => {
               text: `Here is the electricity bill summary for ${uksc.nickname}.`
             });
             setExportingId(null);
-            setProgress(0);
             return;
          }
       }
@@ -874,7 +865,6 @@ const App = () => {
     window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank');
     
     setExportingId(null);
-    setProgress(0);
   };
 
   // --- RENDER GATES ---
@@ -972,8 +962,8 @@ const App = () => {
                 </div>
               </div>
               <div className="flex flex-col sm:flex-row gap-4">
-                 <button onClick={handleCheckAll} disabled={!!loading} className="px-6 py-5 bg-emerald-500 text-white rounded-2xl font-black shadow-2xl hover:bg-emerald-600 flex items-center gap-3 transition-all hover:-translate-y-1 disabled:opacity-50 disabled:hover:translate-y-0 disabled:shadow-none">
-                    <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+                 <button onClick={handleCheckAll} disabled={loadingIds.size > 0} className="px-6 py-5 bg-emerald-500 text-white rounded-2xl font-black shadow-2xl hover:bg-emerald-600 flex items-center gap-3 transition-all hover:-translate-y-1 disabled:opacity-50 disabled:hover:translate-y-0 disabled:shadow-none">
+                    <RefreshCw className={`w-5 h-5 ${loadingIds.size > 0 ? 'animate-spin' : ''}`} />
                     Sync All
                  </button>
                  <button onClick={() => setIsBulkAddModalOpen(true)} className="px-8 py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-2xl hover:bg-indigo-700 flex items-center gap-3 transition-all hover:-translate-y-1"><Plus className="w-5 h-5" />Add/Import</button>
@@ -1019,16 +1009,16 @@ const App = () => {
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Awaiting Analysis</p>
                       </div>
                     )}
-                    {(loading === uksc.id || exportingId === uksc.id) && <ProgressBar progress={progress} label={loading === uksc.id ? "Analyzing Portal..." : "Generating Report..."} />}
-                    {errorLog && loading === uksc.id && <div className="mt-4 p-3 bg-red-50 rounded-xl flex items-center gap-2 text-[10px] font-bold text-red-600 animate-pulse"><AlertCircle className="w-4 h-4" />{errorLog}</div>}
+                    {(loadingIds.has(uksc.id) || exportingId === uksc.id) && <CompactLoader label={loadingIds.has(uksc.id) ? "Analyzing Portal..." : "Generating Report..."} />}
+                    {errorLog && loadingIds.has(uksc.id) && <div className="mt-4 p-3 bg-red-50 rounded-xl flex items-center gap-2 text-[10px] font-bold text-red-600 animate-pulse"><AlertCircle className="w-4 h-4" />{errorLog}</div>}
                   </div>
                   <div className="p-6 pt-0 flex gap-2">
-                    <button onClick={() => fetchBillDetails(uksc)} disabled={!!loading || !!exportingId} className="flex-1 flex items-center justify-center gap-3 py-4 rounded-2xl text-xs font-black bg-white text-indigo-600 border border-slate-100 hover:bg-slate-50 disabled:opacity-50 transition-all shadow-sm"><Search className="w-4 h-4" />Check</button>
+                    <button onClick={() => fetchBillDetails(uksc)} disabled={loadingIds.has(uksc.id) || !!exportingId} className="flex-1 flex items-center justify-center gap-3 py-4 rounded-2xl text-xs font-black bg-white text-indigo-600 border border-slate-100 hover:bg-slate-50 disabled:opacity-50 transition-all shadow-sm"><Search className="w-4 h-4" />Check</button>
                     <button onClick={() => setPreviewUrl((uksc.customUrl || `${DEFAULT_URL_TEMPLATE}${uksc.number}`).replace('<ukscnum>', uksc.number))} className="p-4 bg-slate-50 text-slate-400 rounded-2xl hover:bg-indigo-50 hover:text-indigo-600 transition-colors flex items-center gap-1 group relative overflow-hidden">
                       <Eye className="w-5 h-5" />
                       <ArrowRight className="w-4 h-4 blinking-arrow hidden group-hover:block" />
                     </button>
-                    <button onClick={() => handleDownloadPDF(uksc)} disabled={!!loading || !!exportingId} className="p-4 bg-slate-900 text-white rounded-2xl hover:bg-indigo-600 disabled:opacity-50 transition-all shadow-lg"><Download className="w-5 h-5" /></button>
+                    <button onClick={() => handleDownloadPDF(uksc)} disabled={loadingIds.has(uksc.id) || !!exportingId} className="p-4 bg-slate-900 text-white rounded-2xl hover:bg-indigo-600 disabled:opacity-50 transition-all shadow-lg"><Download className="w-5 h-5" /></button>
                     <button onClick={() => handleShareWhatsApp(uksc)} className="p-4 bg-emerald-500 text-white rounded-2xl hover:bg-emerald-600 transition-all shadow-lg"><Share2 className="w-5 h-5" /></button>
                   </div>
                 </div>
